@@ -6,6 +6,7 @@ build/
 build-*/
 tmp/
 *.log
+scripts/kote-zsh-theme/
 
 config/runtime.env
 config/runtime.env.local
