@@ -1,0 +1,11 @@
+.DS_Store
+.qtcreator/
+*.user
+*.pro.user
+build/
+build-*/
+tmp/
+*.log
+
+config/runtime.env
+config/runtime.env.local

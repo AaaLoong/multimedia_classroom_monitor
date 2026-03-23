@@ -1,0 +1,15 @@
+<RCC>
+  <qresource prefix="/">
+    <file alias="common/qmldir">common/qmldir</file>
+    <file alias="common/Theme.qml">common/Theme.qml</file>
+    <file alias="common/SurfaceCard.qml">common/SurfaceCard.qml</file>
+    <file alias="common/StatusChip.qml">common/StatusChip.qml</file>
+    <file alias="common/MetricCard.qml">common/MetricCard.qml</file>
+    <file alias="common/SectionHeader.qml">common/SectionHeader.qml</file>
+    <file alias="common/ActionButton.qml">common/ActionButton.qml</file>
+    <file alias="admin/AdminApp.qml">admin/AdminApp.qml</file>
+    <file alias="admin/AdminAppForm.ui.qml">admin/AdminAppForm.ui.qml</file>
+    <file alias="classroom/ClassroomApp.qml">classroom/ClassroomApp.qml</file>
+    <file alias="classroom/ClassroomAppForm.ui.qml">classroom/ClassroomAppForm.ui.qml</file>
+  </qresource>
+</RCC>

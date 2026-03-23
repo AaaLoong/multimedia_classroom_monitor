@@ -1,0 +1,5 @@
+<RCC>
+  <qresource prefix="/">
+    <file alias="device/SimulatorApp.qml">device/SimulatorApp.qml</file>
+  </qresource>
+</RCC>
