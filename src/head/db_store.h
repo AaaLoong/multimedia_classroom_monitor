@@ -75,11 +75,19 @@ public:
     bool registerClassroom(const QString &roomId);
     bool unregisterClassroom(const QString &roomId);
     bool hasAdminUsers();
+    QJsonArray loadAdminUsers();
     QJsonObject loadAdminUser(const QString &username);
     bool createAdminUser(const QString &username,
                          const QString &passwordSalt,
                          const QString &passwordHash,
-                         int pbkdf2Iterations);
+                         int pbkdf2Iterations,
+                         bool isSuper,
+                         bool canChangePassword);
+    bool updateAdminPassword(const QString &username,
+                             const QString &passwordSalt,
+                             const QString &passwordHash,
+                             int pbkdf2Iterations);
+    bool deleteAdminUser(const QString &username);
 
 private:
     DbConfig cfg_;

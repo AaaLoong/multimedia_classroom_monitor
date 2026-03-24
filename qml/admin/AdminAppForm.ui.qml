@@ -9,12 +9,15 @@ Item {
     property bool loggedIn: false
     property bool locked: false
     property bool busy: false
+    property bool isSuperAdmin: false
+    property bool canChangePassword: false
     property int navIndex: 0
     property int selectedDeviceIndex: -1
     property bool hasSelectedDevice: false
     property string pageTitle: "系统总览"
     property string pageDateText: ""
     property string statusText: ""
+    property string adminUsername: ""
     property string overviewHeadline: ""
     property string overviewFootnote: ""
     property int roomCount: 0
@@ -33,6 +36,8 @@ Item {
     property alias navAlertButton: alertNavButton
     property alias syncButton: syncButton
     property alias lockButton: lockButton
+    property alias manageAdminsButton: manageAdminsButton
+    property alias changePasswordButton: changePasswordButton
     property alias viewAllAlertsButton: viewAllAlertsButton
     property alias powerOnButton: powerOnButton
     property alias powerOffButton: powerOffButton
@@ -315,6 +320,13 @@ Item {
                                 toneColor: root.locked ? Common.Theme.danger : Common.Theme.success
                                 fillColor: root.locked ? Common.Theme.dangerSoft : Common.Theme.successSoft
                             }
+
+                            Common.StatusChip {
+                                visible: root.adminUsername !== ""
+                                text: root.isSuperAdmin ? ("超管 " + root.adminUsername) : ("管理员 " + root.adminUsername)
+                                toneColor: Common.Theme.accent
+                                fillColor: Common.Theme.accentSoft
+                            }
                         }
 
                         RowLayout {
@@ -341,6 +353,20 @@ Item {
                                     font.pixelSize: 13
                                     elide: Text.ElideRight
                                 }
+                            }
+
+                            Common.ActionButton {
+                                id: manageAdminsButton
+                                text: "管理管理员"
+                                variant: "secondary"
+                                visible: root.isSuperAdmin
+                            }
+
+                            Common.ActionButton {
+                                id: changePasswordButton
+                                text: "修改密码"
+                                variant: "secondary"
+                                visible: root.canChangePassword
                             }
 
                             Common.ActionButton {
@@ -892,7 +918,7 @@ Item {
                     }
 
                     Text {
-                        text: "登录后进入管理后台"
+                        text: "登录后进入管理后台，账户由超级管理员统一维护"
                         color: Common.Theme.textSecondary
                         width: parent.width
                         wrapMode: Text.WordWrap

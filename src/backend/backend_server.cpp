@@ -16,6 +16,7 @@
 #include <QUuid>
 #include <QWaitCondition>
 #include <QPasswordDigestor>
+#include <QRegularExpression>
 #include <QtGlobal>
 #include <QtConcurrent>
 #include <atomic>
@@ -61,6 +62,8 @@ struct CommandRuntime {
 struct AdminSession {
     QString token;
     QString username;
+    bool isSuper = false;
+    bool canChangePassword = true;
     QDateTime issuedAt;
     QDateTime expiresAt;
 };
@@ -114,6 +117,17 @@ static constexpr int kPasswordSaltLength = 16;
 static constexpr int kPasswordHashLength = 32;
 static constexpr int kPasswordIterations = 210000;
 static constexpr int kSessionTtlSeconds = 8 * 60 * 60;
+
+static bool isValidAdminUsername(const QString &username)
+{
+    static const QRegularExpression re(QStringLiteral("^[A-Za-z][A-Za-z0-9_-]{2,31}$"));
+    return re.match(username.trimmed()).hasMatch();
+}
+
+static bool isValidAdminPassword(const QString &password)
+{
+    return password.size() >= 6 && password.size() <= 64;
+}
 
 class BackendServer : public QObject
 {
@@ -252,17 +266,21 @@ private:
             const auto body = QJsonDocument::fromJson(QByteArray::fromStdString(req.body)).object();
             const QString user = body.value("username").toString().trimmed();
             const QString pwd = body.value("password").toString();
-            if (!authenticateAdmin(user, pwd)) {
+            const QJsonObject adminUser = authenticateAdmin(user, pwd);
+            if (adminUser.isEmpty()) {
                 respondError(res, "invalid_credentials", 401);
                 return;
             }
 
-            const QString token = issueSession(user);
+            const QString token = issueSession(adminUser);
             QMutexLocker locker(&sessionMutex_);
             const auto session = sessions_.value(token);
             respondJson(res, QJsonDocument(QJsonObject{
                              {"token", token},
                              {"username", session.username},
+                             {"is_super", session.isSuper},
+                             {"can_manage_admins", session.isSuper},
+                             {"can_change_password", session.canChangePassword},
                              {"expires_at", session.expiresAt.toUTC().toString(Qt::ISODate)}
                          }));
         });
@@ -274,6 +292,139 @@ private:
                 return;
             }
             respondJson(res, QJsonDocument(QJsonObject{{"status", "logged_out"}}));
+        });
+
+        server_->Get("/admin-users", [&](const httplib::Request &req, httplib::Response &res) {
+            AdminSession session;
+            if (!currentSession(req, &session)) {
+                respondError(res, "unauthorized", 401);
+                return;
+            }
+            if (!session.isSuper) {
+                respondError(res, "forbidden", 403);
+                return;
+            }
+
+            respondJson(res, QJsonDocument(QJsonObject{{"admins", db_.loadAdminUsers()}}));
+        });
+
+        server_->Post("/admin-users", [&](const httplib::Request &req, httplib::Response &res) {
+            AdminSession session;
+            if (!currentSession(req, &session)) {
+                respondError(res, "unauthorized", 401);
+                return;
+            }
+            if (!session.isSuper) {
+                respondError(res, "forbidden", 403);
+                return;
+            }
+
+            const auto body = QJsonDocument::fromJson(QByteArray::fromStdString(req.body)).object();
+            const QString username = body.value("username").toString().trimmed();
+            const QString password = body.value("password").toString();
+            if (!isValidAdminUsername(username)) {
+                respondError(res, "invalid_username", 400);
+                return;
+            }
+            if (!isValidAdminPassword(password)) {
+                respondError(res, "invalid_password", 400);
+                return;
+            }
+            if (!db_.loadAdminUser(username).isEmpty()) {
+                respondError(res, "admin_exists", 409);
+                return;
+            }
+
+            const QByteArray salt = randomBytes(kPasswordSaltLength);
+            const QByteArray hash = derivePasswordHash(password, salt, kPasswordIterations);
+            const bool ok = db_.createAdminUser(username,
+                                                QString::fromUtf8(salt.toBase64()),
+                                                QString::fromUtf8(hash.toBase64()),
+                                                kPasswordIterations,
+                                                false,
+                                                true);
+            if (!ok) {
+                respondError(res, "create_admin_failed", 500);
+                return;
+            }
+
+            respondJson(res, QJsonDocument(QJsonObject{
+                             {"status", "created"},
+                             {"username", username},
+                             {"is_super", false}
+                         }),
+                        201);
+        });
+
+        server_->Delete(R"(/admin-users/([\w\-]+))", [&](const httplib::Request &req, httplib::Response &res) {
+            AdminSession session;
+            if (!currentSession(req, &session)) {
+                respondError(res, "unauthorized", 401);
+                return;
+            }
+            if (!session.isSuper) {
+                respondError(res, "forbidden", 403);
+                return;
+            }
+
+            const QString username = QString::fromStdString(req.matches[1]).trimmed();
+            const QJsonObject target = db_.loadAdminUser(username);
+            if (target.isEmpty()) {
+                respondError(res, "admin_not_found", 404);
+                return;
+            }
+            if (target.value("is_super").toBool(false)) {
+                respondError(res, "cannot_delete_super_admin", 403);
+                return;
+            }
+            if (!db_.deleteAdminUser(username)) {
+                respondError(res, "delete_admin_failed", 500);
+                return;
+            }
+
+            respondJson(res, QJsonDocument(QJsonObject{
+                             {"status", "deleted"},
+                             {"username", username}
+                         }));
+        });
+
+        server_->Post("/me/password", [&](const httplib::Request &req, httplib::Response &res) {
+            AdminSession session;
+            if (!currentSession(req, &session)) {
+                respondError(res, "unauthorized", 401);
+                return;
+            }
+            if (session.isSuper || !session.canChangePassword) {
+                respondError(res, "password_change_forbidden", 403);
+                return;
+            }
+
+            const auto body = QJsonDocument::fromJson(QByteArray::fromStdString(req.body)).object();
+            const QString oldPassword = body.value("old_password").toString();
+            const QString newPassword = body.value("new_password").toString();
+            if (!isValidAdminPassword(newPassword)) {
+                respondError(res, "invalid_password", 400);
+                return;
+            }
+
+            const QJsonObject currentUser = authenticateAdmin(session.username, oldPassword);
+            if (currentUser.isEmpty()) {
+                respondError(res, "invalid_current_password", 401);
+                return;
+            }
+
+            const QByteArray salt = randomBytes(kPasswordSaltLength);
+            const QByteArray hash = derivePasswordHash(newPassword, salt, kPasswordIterations);
+            const bool ok = db_.updateAdminPassword(session.username,
+                                                    QString::fromUtf8(salt.toBase64()),
+                                                    QString::fromUtf8(hash.toBase64()),
+                                                    kPasswordIterations);
+            if (!ok) {
+                respondError(res, "update_password_failed", 500);
+                return;
+            }
+
+            respondJson(res, QJsonDocument(QJsonObject{{"status", "updated"}}));
         });
 
         server_->Post("/lock", [&](const httplib::Request &req, httplib::Response &res) {
@@ -503,7 +654,9 @@ private:
         const bool ok = db_.createAdminUser(username,
                                             QString::fromUtf8(salt.toBase64()),
                                             QString::fromUtf8(hash.toBase64()),
-                                            kPasswordIterations);
+                                            kPasswordIterations,
+                                            true,
+                                            false);
         if (!ok) {
             qCritical("初始化管理员账号失败。");
             return false;
@@ -611,14 +764,16 @@ private:
     }
 
     // 为登录成功的管理员发放一个 8 小时有效的随机会话 token。
-    QString issueSession(const QString &username)
+    QString issueSession(const QJsonObject &user)
     {
         pruneExpiredSessions();
 
         AdminSession session;
         session.token = QString::fromUtf8(randomBytes(32).toBase64(QByteArray::Base64UrlEncoding |
                                                                    QByteArray::OmitTrailingEquals));
-        session.username = username;
+        session.username = user.value("username").toString();
+        session.isSuper = user.value("is_super").toBool(false);
+        session.canChangePassword = user.value("can_change_password").toBool(true);
         session.issuedAt = QDateTime::currentDateTimeUtc();
         session.expiresAt = session.issuedAt.addSecs(kSessionTtlSeconds);
 
@@ -636,7 +791,7 @@ private:
     }
 
     // 登录校验基于数据库中的 PBKDF2 哈希，不再比较明文字符串。
-    bool authenticateAdmin(const QString &username, const QString &password)
+    QJsonObject authenticateAdmin(const QString &username, const QString &password)
     {
         const QJsonObject user = db_.loadAdminUser(username);
         const bool userExists = !user.isEmpty() && user.value("enabled").toBool(false);
@@ -658,18 +813,27 @@ private:
             : QByteArray(kPasswordHashLength, '\0');
         const QByteArray actualHash = derivePasswordHash(password, safeSalt, iterations);
         const bool match = constantTimeEquals(actualHash, safeHash);
-        return userExists && match;
+        return (userExists && match) ? user : QJsonObject();
     }
 
-    // Bearer Token 校验基于内存会话表。
-    bool isAuthorized(const httplib::Request &req)
+    bool currentSession(const httplib::Request &req, AdminSession *out)
     {
         pruneExpiredSessions();
         const QString token = bearerTokenFromRequest(req);
         if (token.isEmpty())
             return false;
         QMutexLocker locker(&sessionMutex_);
-        return sessions_.contains(token);
+        if (!sessions_.contains(token))
+            return false;
+        if (out)
+            *out = sessions_.value(token);
+        return true;
+    }
+
+    // Bearer Token 校验基于内存会话表。
+    bool isAuthorized(const httplib::Request &req)
+    {
+        return currentSession(req, nullptr);
     }
 
     // 统一把 QJsonDocument 写回 HTTP 响应。

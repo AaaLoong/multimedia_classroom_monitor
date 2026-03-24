@@ -1,6 +1,10 @@
 import QtQuick 2.15
 import "." as Common
 
+/*
+ * SurfaceCard 只提供统一卡片外观。
+ * 如果它被放进 Layout，调用方仍要显式给出 implicit/preferred 尺寸，不能依赖 anchors 让 Layout 猜大小。
+ */
 Rectangle {
     id: root
 

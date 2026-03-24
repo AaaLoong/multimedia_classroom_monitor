@@ -15,6 +15,35 @@ DbStore::DbStore()
     driverName_ = cfg_.driver;
 }
 
+static bool columnExists(QSqlDatabase &db, const QString &tableName, const QString &columnName)
+{
+    QSqlQuery q(db);
+    q.prepare(R"(SELECT COUNT(*) FROM information_schema.columns
+                 WHERE table_schema = DATABASE()
+                   AND table_name = ?
+                   AND column_name = ?)");
+    q.addBindValue(tableName);
+    q.addBindValue(columnName);
+    if (!q.exec()) {
+        qWarning("查询列信息失败: %s", qPrintable(q.lastError().text()));
+        return false;
+    }
+    return q.next() && q.value(0).toInt() > 0;
+}
+
+static void ensureColumn(QSqlDatabase &db,
+                         const QString &tableName,
+                         const QString &columnName,
+                         const QString &ddl)
+{
+    if (columnExists(db, tableName, columnName))
+        return;
+
+    QSqlQuery q(db);
+    if (!q.exec(ddl))
+        qWarning("补齐字段 %s.%s 失败: %s", qPrintable(tableName), qPrintable(columnName), qPrintable(q.lastError().text()));
+}
+
 // 初始化数据库驱动并尝试建立可用连接。
 bool DbStore::init()
 {
@@ -593,6 +622,37 @@ bool DbStore::hasAdminUsers()
     return q.next();
 }
 
+QJsonArray DbStore::loadAdminUsers()
+{
+    QJsonArray arr;
+    auto db = connectionForThread();
+    if (!db.isValid() || !db.isOpen())
+        return arr;
+
+    QSqlQuery q(db);
+    q.prepare(R"(SELECT username, is_super, can_change_password, enabled,
+                        DATE_FORMAT(created_at, '%Y-%m-%dT%H:%i:%sZ'),
+                        DATE_FORMAT(password_updated_at, '%Y-%m-%dT%H:%i:%sZ')
+                 FROM admin_users
+                 ORDER BY is_super DESC, created_at ASC, username ASC)");
+    if (!q.exec()) {
+        qWarning("读取管理员列表失败: %s", qPrintable(q.lastError().text()));
+        return arr;
+    }
+
+    while (q.next()) {
+        QJsonObject obj;
+        obj["username"] = q.value(0).toString();
+        obj["is_super"] = q.value(1).toBool();
+        obj["can_change_password"] = q.value(2).toBool();
+        obj["enabled"] = q.value(3).toBool();
+        obj["created_at"] = q.value(4).toString();
+        obj["password_updated_at"] = q.value(5).toString();
+        arr.append(obj);
+    }
+    return arr;
+}
+
 QJsonObject DbStore::loadAdminUser(const QString &username)
 {
     QJsonObject obj;
@@ -602,7 +662,7 @@ QJsonObject DbStore::loadAdminUser(const QString &username)
 
     QSqlQuery q(db);
     q.prepare(R"(SELECT id, username, password_salt, password_hash,
-                        pbkdf2_iterations, enabled,
+                        pbkdf2_iterations, enabled, is_super, can_change_password,
                         DATE_FORMAT(password_updated_at, '%Y-%m-%dT%H:%i:%sZ')
                  FROM admin_users
                  WHERE username=? LIMIT 1)");
@@ -620,14 +680,18 @@ QJsonObject DbStore::loadAdminUser(const QString &username)
     obj["password_hash"] = q.value(3).toString();
     obj["pbkdf2_iterations"] = q.value(4).toInt();
     obj["enabled"] = q.value(5).toBool();
-    obj["password_updated_at"] = q.value(6).toString();
+    obj["is_super"] = q.value(6).toBool();
+    obj["can_change_password"] = q.value(7).toBool();
+    obj["password_updated_at"] = q.value(8).toString();
     return obj;
 }
 
 bool DbStore::createAdminUser(const QString &username,
                               const QString &passwordSalt,
                               const QString &passwordHash,
-                              int pbkdf2Iterations)
+                              int pbkdf2Iterations,
+                              bool isSuper,
+                              bool canChangePassword)
 {
     auto db = connectionForThread();
     if (!db.isValid() || !db.isOpen())
@@ -636,17 +700,66 @@ bool DbStore::createAdminUser(const QString &username,
     QSqlQuery q(db);
     q.prepare(R"(INSERT INTO admin_users(
                     username, password_salt, password_hash, pbkdf2_iterations,
-                    enabled, created_at, updated_at, password_updated_at
-                 ) VALUES(?,?,?,?,1,UTC_TIMESTAMP(),UTC_TIMESTAMP(),UTC_TIMESTAMP()))");
+                    enabled, is_super, can_change_password,
+                    created_at, updated_at, password_updated_at
+                 ) VALUES(?,?,?,?,1,?,?,UTC_TIMESTAMP(),UTC_TIMESTAMP(),UTC_TIMESTAMP()))");
     q.addBindValue(username);
     q.addBindValue(passwordSalt);
     q.addBindValue(passwordHash);
     q.addBindValue(pbkdf2Iterations);
+    q.addBindValue(isSuper ? 1 : 0);
+    q.addBindValue(canChangePassword ? 1 : 0);
     if (!q.exec()) {
         qWarning("创建管理员失败: %s", qPrintable(q.lastError().text()));
         return false;
     }
     return true;
+}
+
+bool DbStore::updateAdminPassword(const QString &username,
+                                  const QString &passwordSalt,
+                                  const QString &passwordHash,
+                                  int pbkdf2Iterations)
+{
+    auto db = connectionForThread();
+    if (!db.isValid() || !db.isOpen())
+        return false;
+
+    QSqlQuery q(db);
+    q.prepare(R"(UPDATE admin_users
+                 SET password_salt=?,
+                     password_hash=?,
+                     pbkdf2_iterations=?,
+                     updated_at=UTC_TIMESTAMP(),
+                     password_updated_at=UTC_TIMESTAMP()
+                 WHERE username=? LIMIT 1)");
+    q.addBindValue(passwordSalt);
+    q.addBindValue(passwordHash);
+    q.addBindValue(pbkdf2Iterations);
+    q.addBindValue(username);
+    if (!q.exec()) {
+        qWarning("更新管理员密码失败: %s", qPrintable(q.lastError().text()));
+        return false;
+    }
+    return q.numRowsAffected() > 0;
+}
+
+bool DbStore::deleteAdminUser(const QString &username)
+{
+    auto db = connectionForThread();
+    if (!db.isValid() || !db.isOpen())
+        return false;
+
+    QSqlQuery q(db);
+    q.prepare(R"(DELETE FROM admin_users
+                 WHERE username=? AND is_super=0
+                 LIMIT 1)");
+    q.addBindValue(username);
+    if (!q.exec()) {
+        qWarning("删除管理员失败: %s", qPrintable(q.lastError().text()));
+        return false;
+    }
+    return q.numRowsAffected() > 0;
 }
 
 // 把配置参数应用到 QSqlDatabase 对象上。
@@ -766,4 +879,33 @@ void DbStore::ensureTables(QSqlDatabase &db)
         updated_at DATETIME NOT NULL,
         password_updated_at DATETIME NOT NULL
     ))");
+
+    ensureColumn(db,
+                 "admin_users",
+                 "is_super",
+                 "ALTER TABLE admin_users ADD COLUMN is_super TINYINT(1) NOT NULL DEFAULT 0 AFTER enabled");
+    ensureColumn(db,
+                 "admin_users",
+                 "can_change_password",
+                 "ALTER TABLE admin_users ADD COLUMN can_change_password TINYINT(1) NOT NULL DEFAULT 1 AFTER is_super");
+
+    QSqlQuery superCount(db);
+    superCount.prepare(R"(SELECT COUNT(*) FROM admin_users WHERE is_super=1)");
+    int count = 0;
+    if (superCount.exec() && superCount.next())
+        count = superCount.value(0).toInt();
+
+    if (count == 0) {
+        QSqlQuery promote(db);
+        promote.exec(R"(UPDATE admin_users
+                        SET is_super=1, can_change_password=0
+                        WHERE id = (
+                            SELECT id FROM (
+                                SELECT id FROM admin_users ORDER BY id ASC LIMIT 1
+                            ) AS bootstrap_admin
+                        ))");
+    }
+
+    QSqlQuery fixSuper(db);
+    fixSuper.exec(R"(UPDATE admin_users SET can_change_password=0 WHERE is_super=1)");
 }

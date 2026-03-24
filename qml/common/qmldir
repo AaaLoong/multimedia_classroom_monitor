@@ -5,3 +5,4 @@ StatusChip 1.0 StatusChip.qml
 MetricCard 1.0 MetricCard.qml
 SectionHeader 1.0 SectionHeader.qml
 ActionButton 1.0 ActionButton.qml
+AppDialog 1.0 AppDialog.qml

@@ -54,10 +54,80 @@ static QString errorMessageFromDocument(const QJsonDocument &doc, const QString 
 {
     if (doc.isObject() && doc.object().contains("error")) {
         const QString error = doc.object().value("error").toString().trimmed();
+        if (error == "invalid_username")
+            return QStringLiteral("管理员用户名需以字母开头，长度 3 到 32 位");
+        if (error == "invalid_password")
+            return QStringLiteral("密码长度需为 6 到 64 位");
+        if (error == "admin_exists")
+            return QStringLiteral("管理员账号已存在");
+        if (error == "admin_not_found")
+            return QStringLiteral("未找到该管理员");
+        if (error == "cannot_delete_super_admin")
+            return QStringLiteral("超级管理员不可删除");
+        if (error == "password_change_forbidden")
+            return QStringLiteral("当前账号不支持修改密码");
+        if (error == "invalid_current_password")
+            return QStringLiteral("当前密码错误");
+        if (error == "forbidden")
+            return QStringLiteral("当前账号没有权限执行此操作");
+        if (error == "create_admin_failed")
+            return QStringLiteral("新增管理员失败");
+        if (error == "delete_admin_failed")
+            return QStringLiteral("删除管理员失败");
+        if (error == "update_password_failed")
+            return QStringLiteral("修改密码失败");
+        if (error == "unauthorized")
+            return QStringLiteral("登录状态已失效，请重新登录");
         if (!error.isEmpty())
             return error;
     }
     return fallback;
+}
+
+void RestClient::updateAdminSessionFromJson(const QJsonDocument &doc)
+{
+    const QJsonObject obj = doc.object();
+    const QString newUsername = obj.value("username").toString().trimmed();
+    const bool newSuperAdmin = obj.value("is_super").toBool(false);
+    const bool newCanManageAdmins = obj.value("can_manage_admins").toBool(false);
+    const bool newCanChangePassword = obj.value("can_change_password").toBool(false);
+
+    if (adminUsername_ != newUsername) {
+        adminUsername_ = newUsername;
+        emit adminUsernameChanged();
+    }
+    if (superAdmin_ != newSuperAdmin) {
+        superAdmin_ = newSuperAdmin;
+        emit superAdminChanged();
+    }
+    if (canManageAdmins_ != newCanManageAdmins) {
+        canManageAdmins_ = newCanManageAdmins;
+        emit canManageAdminsChanged();
+    }
+    if (canChangePassword_ != newCanChangePassword) {
+        canChangePassword_ = newCanChangePassword;
+        emit canChangePasswordChanged();
+    }
+}
+
+void RestClient::clearAdminSession()
+{
+    if (!adminUsername_.isEmpty()) {
+        adminUsername_.clear();
+        emit adminUsernameChanged();
+    }
+    if (superAdmin_) {
+        superAdmin_ = false;
+        emit superAdminChanged();
+    }
+    if (canManageAdmins_) {
+        canManageAdmins_ = false;
+        emit canManageAdminsChanged();
+    }
+    if (canChangePassword_) {
+        canChangePassword_ = false;
+        emit canChangePasswordChanged();
+    }
 }
 
 // 更新后端地址时，只在真正变化时才通知 QML。
@@ -108,6 +178,7 @@ void RestClient::handleReply(QNetworkReply *reply, const std::function<void(cons
                 msg = QStringLiteral("服务错误(%1): %2").arg(httpStatus).arg(msg);
             if (httpStatus == 401 && !token_.isEmpty()) {
                 token_.clear();
+                clearAdminSession();
                 emit unauthorized(QStringLiteral("登录状态已失效，请重新登录"));
             } else if (httpStatus == 401 && reply->url().path() == "/login") {
                 emit loginFailed(QStringLiteral("用户名或密码错误"));
@@ -135,6 +206,7 @@ void RestClient::login(const QString &username, const QString &password)
             return;
         }
         token_ = t;
+        updateAdminSessionFromJson(doc);
         emit loginSucceeded();
         fetchLock();
         fetchDevices();
@@ -153,6 +225,7 @@ void RestClient::logout()
     auto reply = nam_.post(makeRequest("/logout"), QByteArray());
     handleReply(reply, [=](const QJsonDocument &) {
         token_.clear();
+        clearAdminSession();
         emit loginFailed(QStringLiteral("已退出登录"));
     });
 }
@@ -323,6 +396,62 @@ void RestClient::unregisterClassroom(const QString &roomId)
     handleReply(reply, [=](const QJsonDocument &doc) {
         updateRegistrationFromJson(doc);
         emit operationFinished("unregister", QStringLiteral("教室已取消接入"));
+    });
+}
+
+void RestClient::fetchAdminUsers()
+{
+    auto reply = nam_.get(makeRequest("/admin-users"));
+    handleReply(reply, [=](const QJsonDocument &doc) {
+        QVariantList list;
+        if (doc.isObject()) {
+            const QJsonArray admins = doc.object().value("admins").toArray();
+            for (const auto &item : admins)
+                list.push_back(item.toObject().toVariantMap());
+        }
+        emit adminUsersReceived(list);
+    });
+}
+
+void RestClient::createAdminUser(const QString &username, const QString &password)
+{
+    setBusy(true);
+    QJsonObject obj;
+    obj["username"] = username.trimmed();
+    obj["password"] = password;
+    auto reply = nam_.post(makeRequest("/admin-users"), QJsonDocument(obj).toJson(QJsonDocument::Compact));
+    handleReply(reply, [=](const QJsonDocument &) {
+        emit operationFinished("admin_create", QStringLiteral("管理员已新增"));
+        fetchAdminUsers();
+    });
+}
+
+void RestClient::deleteAdminUser(const QString &username)
+{
+    const QString target = username.trimmed();
+    if (target.isEmpty()) {
+        emit error(QStringLiteral("管理员账号为空，无法删除"));
+        return;
+    }
+
+    setBusy(true);
+    const QString encoded = QString::fromUtf8(QUrl::toPercentEncoding(target));
+    auto reply = nam_.deleteResource(makeRequest(QString("/admin-users/%1").arg(encoded)));
+    handleReply(reply, [=](const QJsonDocument &) {
+        emit operationFinished("admin_delete", QStringLiteral("管理员已删除"));
+        fetchAdminUsers();
+    });
+}
+
+void RestClient::changeMyPassword(const QString &oldPassword, const QString &newPassword)
+{
+    setBusy(true);
+    QJsonObject obj;
+    obj["old_password"] = oldPassword;
+    obj["new_password"] = newPassword;
+    auto reply = nam_.post(makeRequest("/me/password"), QJsonDocument(obj).toJson(QJsonDocument::Compact));
+    handleReply(reply, [=](const QJsonDocument &) {
+        emit operationFinished("password_change", QStringLiteral("密码已修改"));
     });
 }
 

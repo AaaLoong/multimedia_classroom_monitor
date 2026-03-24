@@ -22,15 +22,20 @@ ApplicationWindow {
 
     property bool loggedIn: false
     property bool locked: api.locked
+    property bool isSuperAdmin: api.superAdmin
+    property bool canManageAdmins: api.canManageAdmins
+    property bool canChangePassword: api.canChangePassword
     property bool manualRefresh: false
     property int navIndex: 0
     property int selectedDeviceIndex: -1
     property string statusText: "系统待命"
+    property string adminUsername: api.adminUsername
     property var devicesCache: []
 
     ListModel { id: alertModel }
     ListModel { id: alertPreviewModel }
     ListModel { id: roomSummaryModel }
+    ListModel { id: adminUserModel }
 
     function formatDateCN(d) {
         return d.getFullYear() + "年" + (d.getMonth() + 1) + "月" + d.getDate() + "日 星期" + ["日", "一", "二", "三", "四", "五", "六"][d.getDay()]
@@ -173,6 +178,20 @@ ApplicationWindow {
         api.sendCommand(d.roomId, d.deviceId, action)
     }
 
+    function resetAdminUsers(admins) {
+        adminUserModel.clear()
+        for (let i = 0; i < admins.length; ++i) {
+            const item = admins[i]
+            adminUserModel.append({
+                username: item.username ? item.username : "",
+                isSuper: item.is_super ? true : false,
+                canChangePassword: item.can_change_password ? true : false,
+                createdAt: item.created_at ? formatTimestamp(item.created_at) : "",
+                passwordUpdatedAt: item.password_updated_at ? formatTimestamp(item.password_updated_at) : ""
+            })
+        }
+    }
+
     Timer {
         interval: 2500
         running: window.loggedIn
@@ -287,18 +306,267 @@ ApplicationWindow {
         }
     }
 
+    Common.AppDialog {
+        id: manageAdminsDialog
+        dialogTitle: "管理管理员"
+        preferredDialogWidth: 760
+        preferredDialogHeight: 720
+        minimumDialogWidth: 620
+        minimumDialogHeight: 440
+
+        Text {
+            Layout.fillWidth: true
+            text: "仅超级管理员可新增或删除普通管理员。初始超级管理员账号固定保留，不支持改密。"
+            wrapMode: Text.WordWrap
+            color: Common.Theme.textSecondary
+            font.family: Common.Theme.fontFamily
+            font.pixelSize: 13
+        }
+
+        Common.SurfaceCard {
+            id: createAdminCard
+            Layout.fillWidth: true
+            implicitHeight: createAdminSection.implicitHeight + padding * 2
+            clipContent: false
+            fillColor: "#f7faff"
+
+            ColumnLayout {
+                id: createAdminSection
+                anchors.fill: parent
+                anchors.margins: createAdminCard.padding
+                spacing: Common.Theme.spaceM
+
+                Common.SectionHeader {
+                    width: parent.width
+                    title: "新增普通管理员"
+                    subtitle: "新增账号默认是普通管理员，不会授予超管权限。"
+                    maxTitleLines: 1
+                    maxSubtitleLines: 2
+                }
+
+                TextField {
+                    id: newAdminUserField
+                    Layout.fillWidth: true
+                    placeholderText: "账号，3 到 32 位，字母开头"
+                }
+
+                TextField {
+                    id: newAdminPasswordField
+                    Layout.fillWidth: true
+                    placeholderText: "初始密码，6 到 64 位"
+                    echoMode: TextInput.Password
+                }
+
+                Text {
+                    Layout.fillWidth: true
+                    text: "创建后可由普通管理员自行修改密码。"
+                    color: Common.Theme.textSecondary
+                    font.family: Common.Theme.fontFamily
+                    font.pixelSize: 12
+                    wrapMode: Text.WordWrap
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+
+                    Item { Layout.fillWidth: true }
+
+                    Common.ActionButton {
+                        text: "新增管理员"
+                        enabled: newAdminUserField.text.trim() !== "" && newAdminPasswordField.text !== ""
+                        onClicked: api.createAdminUser(newAdminUserField.text, newAdminPasswordField.text)
+                    }
+                }
+            }
+        }
+
+        Common.SectionHeader {
+            Layout.fillWidth: true
+            title: "管理员列表"
+            subtitle: "超级管理员固定保留，普通管理员支持删除。"
+            maxTitleLines: 1
+            maxSubtitleLines: 2
+        }
+
+        Column {
+            Layout.fillWidth: true
+            spacing: Common.Theme.spaceM
+
+            Repeater {
+                model: adminUserModel
+
+                delegate: Common.SurfaceCard {
+                    required property string username
+                    required property bool isSuper
+                    required property bool canChangePassword
+                    required property string createdAt
+                    required property string passwordUpdatedAt
+                    width: parent.width
+                    implicitHeight: adminCardContent.implicitHeight + padding * 2
+                    clipContent: false
+
+                    ColumnLayout {
+                        id: adminCardContent
+                        anchors.fill: parent
+                        anchors.margins: parent.padding
+                        spacing: Common.Theme.spaceS
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Common.Theme.spaceM
+
+                            Text {
+                                text: username
+                                color: Common.Theme.textPrimary
+                                font.family: Common.Theme.fontFamily
+                                font.pixelSize: 18
+                                font.bold: true
+                            }
+
+                            Common.StatusChip {
+                                text: isSuper ? "超级管理员" : "普通管理员"
+                                toneColor: isSuper ? Common.Theme.warning : Common.Theme.accent
+                                fillColor: isSuper ? "#fff4dd" : Common.Theme.accentSoft
+                            }
+
+                            Item { Layout.fillWidth: true }
+
+                            Common.ActionButton {
+                                visible: !isSuper
+                                text: "删除"
+                                variant: "danger"
+                                onClicked: api.deleteAdminUser(username)
+                            }
+                        }
+
+                        Text {
+                            Layout.fillWidth: true
+                            text: isSuper
+                                  ? "初始超级管理员固定保留，不支持删除和修改密码。"
+                                  : ("创建时间 " + createdAt + " | 最近改密 " + (passwordUpdatedAt !== "" ? passwordUpdatedAt : "未记录"))
+                            color: Common.Theme.textSecondary
+                            font.family: Common.Theme.fontFamily
+                            font.pixelSize: 12
+                            wrapMode: Text.WordWrap
+                        }
+                    }
+                }
+            }
+
+            Text {
+                width: parent.width
+                visible: adminUserModel.count === 0
+                text: "当前没有可展示的管理员。"
+                color: Common.Theme.textSecondary
+                font.family: Common.Theme.fontFamily
+                font.pixelSize: 13
+            }
+        }
+
+        onOpened: {
+            if (window.canManageAdmins)
+                api.fetchAdminUsers()
+        }
+    }
+
+    Common.AppDialog {
+        id: changePasswordDialog
+        dialogTitle: "修改密码"
+        preferredDialogWidth: 520
+        preferredDialogHeight: 420
+        minimumDialogWidth: 440
+        minimumDialogHeight: 320
+
+        Common.SurfaceCard {
+            id: changePasswordCard
+            Layout.fillWidth: true
+            implicitHeight: changePasswordSection.implicitHeight + padding * 2
+            clipContent: false
+            fillColor: "#f7faff"
+
+            ColumnLayout {
+                id: changePasswordSection
+                anchors.fill: parent
+                anchors.margins: changePasswordCard.padding
+                spacing: Common.Theme.spaceM
+
+                Text {
+                    Layout.fillWidth: true
+                    text: "当前登录账号: " + window.adminUsername
+                    color: Common.Theme.textSecondary
+                    font.family: Common.Theme.fontFamily
+                    font.pixelSize: 13
+                    wrapMode: Text.WordWrap
+                }
+
+                TextField {
+                    id: oldPasswordField
+                    Layout.fillWidth: true
+                    placeholderText: "当前密码"
+                    echoMode: TextInput.Password
+                }
+
+                TextField {
+                    id: newPasswordField
+                    Layout.fillWidth: true
+                    placeholderText: "新密码"
+                    echoMode: TextInput.Password
+                }
+
+                TextField {
+                    id: confirmPasswordField
+                    Layout.fillWidth: true
+                    placeholderText: "确认新密码"
+                    echoMode: TextInput.Password
+                }
+
+                Text {
+                    Layout.fillWidth: true
+                    text: "普通管理员仅可修改本人密码。"
+                    color: Common.Theme.textSecondary
+                    font.family: Common.Theme.fontFamily
+                    font.pixelSize: 12
+                    wrapMode: Text.WordWrap
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+
+                    Item { Layout.fillWidth: true }
+
+                    Common.ActionButton {
+                        text: "确认修改"
+                        enabled: oldPasswordField.text !== ""
+                                 && newPasswordField.text !== ""
+                                 && confirmPasswordField.text !== ""
+                        onClicked: {
+                            if (newPasswordField.text !== confirmPasswordField.text) {
+                                window.statusText = "两次输入的新密码不一致"
+                                return
+                            }
+                            api.changeMyPassword(oldPasswordField.text, newPasswordField.text)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     AdminAppForm {
         id: form
         anchors.fill: parent
         loggedIn: window.loggedIn
         locked: window.locked
         busy: api.busy
+        isSuperAdmin: window.isSuperAdmin
+        canChangePassword: window.canChangePassword
         navIndex: window.navIndex
         selectedDeviceIndex: window.selectedDeviceIndex
         hasSelectedDevice: window.selectedDevice() !== null
         pageTitle: window.navIndex === 0 ? "系统总览" : (window.navIndex === 1 ? "设备控制" : "告警中心")
         pageDateText: "多媒体教室管理系统 | " + window.formatDateCN(new Date())
         statusText: window.statusText
+        adminUsername: window.adminUsername
         overviewHeadline: "统一感知教室接入、设备活跃度与告警分布"
         overviewFootnote: "当前共接入 " + window.uniqueRoomCount() + " 间教室，在线设备 " + window.onlineDeviceCount() + " 台。"
         roomCount: window.uniqueRoomCount()
@@ -344,6 +612,16 @@ ApplicationWindow {
     }
 
     Connections {
+        target: form.manageAdminsButton
+        function onClicked() { manageAdminsDialog.open() }
+    }
+
+    Connections {
+        target: form.changePasswordButton
+        function onClicked() { changePasswordDialog.open() }
+    }
+
+    Connections {
         target: form.viewAllAlertsButton
         function onClicked() { window.navIndex = 2 }
     }
@@ -380,10 +658,13 @@ ApplicationWindow {
             api.fetchDevices()
             api.fetchLock()
             api.fetchAlerts()
+            if (window.canManageAdmins)
+                api.fetchAdminUsers()
         }
 
         function onLoginFailed(message) {
             window.loggedIn = false
+            adminUserModel.clear()
             window.statusText = message
         }
 
@@ -395,6 +676,7 @@ ApplicationWindow {
             alertModel.clear()
             alertPreviewModel.clear()
             roomSummaryModel.clear()
+            adminUserModel.clear()
             window.statusText = message
         }
 
@@ -422,7 +704,22 @@ ApplicationWindow {
             window.statusText = lockedValue ? "教室端已被管理端锁定" : "教室端已解除锁定"
         }
 
-        function onOperationFinished(action, message) { window.statusText = message }
+        function onAdminUsersReceived(admins) {
+            window.resetAdminUsers(admins ? admins : [])
+        }
+
+        function onOperationFinished(action, message) {
+            if (action === "admin_create") {
+                newAdminUserField.text = ""
+                newAdminPasswordField.text = ""
+            } else if (action === "password_change") {
+                oldPasswordField.text = ""
+                newPasswordField.text = ""
+                confirmPasswordField.text = ""
+                changePasswordDialog.close()
+            }
+            window.statusText = message
+        }
         function onError(message) { window.statusText = message }
     }
 }

@@ -20,6 +20,10 @@ class RestClient : public QObject
     Q_PROPERTY(bool busy READ busy NOTIFY busyChanged)
     Q_PROPERTY(bool registered READ registered NOTIFY registrationChanged)
     Q_PROPERTY(bool registrationChecked READ registrationChecked NOTIFY registrationCheckedChanged)
+    Q_PROPERTY(QString adminUsername READ adminUsername NOTIFY adminUsernameChanged)
+    Q_PROPERTY(bool superAdmin READ superAdmin NOTIFY superAdminChanged)
+    Q_PROPERTY(bool canManageAdmins READ canManageAdmins NOTIFY canManageAdminsChanged)
+    Q_PROPERTY(bool canChangePassword READ canChangePassword NOTIFY canChangePasswordChanged)
 public:
     explicit RestClient(QObject *parent = nullptr);
 
@@ -29,6 +33,10 @@ public:
     bool busy() const { return busy_; }
     bool registered() const { return registered_; }
     bool registrationChecked() const { return registrationChecked_; }
+    QString adminUsername() const { return adminUsername_; }
+    bool superAdmin() const { return superAdmin_; }
+    bool canManageAdmins() const { return canManageAdmins_; }
+    bool canChangePassword() const { return canChangePassword_; }
 
     // 设置后端基础地址。
     void setBaseUrl(const QString &url);
@@ -47,6 +55,10 @@ public:
     Q_INVOKABLE void fetchRegistration(const QString &roomId);
     Q_INVOKABLE void registerClassroom(const QString &roomId);
     Q_INVOKABLE void unregisterClassroom(const QString &roomId);
+    Q_INVOKABLE void fetchAdminUsers();
+    Q_INVOKABLE void createAdminUser(const QString &username, const QString &password);
+    Q_INVOKABLE void deleteAdminUser(const QString &username);
+    Q_INVOKABLE void changeMyPassword(const QString &oldPassword, const QString &newPassword);
 
 signals:
     // 这些信号用于把后端数据返回到 QML 页面。
@@ -58,10 +70,15 @@ signals:
     void lockChanged(bool locked);
     void busyChanged();
     void baseUrlChanged();
+    void adminUsernameChanged();
+    void superAdminChanged();
+    void canManageAdminsChanged();
+    void canChangePasswordChanged();
     void registrationChanged(bool registered);
     void registrationCheckedChanged(bool checked);
     void operationFinished(const QString &action, const QString &message);
     void error(const QString &message);
+    void adminUsersReceived(const QVariantList &admins);
 
 private:
     QString baseUrl_ = QStringLiteral("http://127.0.0.1:8080");
@@ -70,6 +87,10 @@ private:
     bool busy_ = false;
     bool registered_ = false;
     bool registrationChecked_ = false;
+    QString adminUsername_;
+    bool superAdmin_ = false;
+    bool canManageAdmins_ = false;
+    bool canChangePassword_ = false;
     QNetworkAccessManager nam_;
 
     // 内部工具函数：拼请求、处理响应、同步状态。
@@ -78,4 +99,6 @@ private:
     void handleReply(QNetworkReply *reply, const std::function<void(const QJsonDocument &)> &onOk);
     void updateLockFromJson(const QJsonDocument &doc);
     void updateRegistrationFromJson(const QJsonDocument &doc);
+    void updateAdminSessionFromJson(const QJsonDocument &doc);
+    void clearAdminSession();
 };
