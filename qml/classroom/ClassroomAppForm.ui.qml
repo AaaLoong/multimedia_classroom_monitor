@@ -8,6 +8,7 @@ Item {
 
     property bool locked: false
     property bool busy: false
+    property bool bulkControlLocked: false
     property bool registered: false
     property bool backendReady: false
     property string roomId: ""
@@ -207,13 +208,13 @@ Item {
                             Common.ActionButton {
                                 id: powerOnAllButton
                                 text: "一键上课"
-                                enabled: !root.locked && root.registered && root.deviceCount > 0
+                                enabled: !root.locked && !root.bulkControlLocked && root.registered && root.deviceCount > 0
                             }
 
                             Common.ActionButton {
                                 id: powerOffAllButton
                                 text: "一键下课"
-                                enabled: !root.locked && root.registered && root.deviceCount > 0
+                                enabled: !root.locked && !root.bulkControlLocked && root.registered && root.deviceCount > 0
                             }
 
                             Common.ActionButton {

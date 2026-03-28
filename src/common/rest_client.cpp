@@ -1,9 +1,9 @@
 ﻿#include "rest_client.h"
 
+#include <QHostAddress>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
-#include <QHostAddress>
 #include <QNetworkRequest>
 #include <QUrl>
 #include <QtGlobal>
@@ -17,6 +17,12 @@
 RestClient::RestClient(QObject *parent)
     : QObject(parent)
 {
+    eventReconnectTimer_.setSingleShot(true);
+    QObject::connect(&eventReconnectTimer_, &QTimer::timeout, this, [this]() {
+        if (stopEventStreamRequested_ || eventMode_ == EventStreamMode::None)
+            return;
+        openEventStream();
+    });
 }
 
 // 把用户传入的基础地址规范化，保证后面的请求路径拼接稳定。
@@ -128,6 +134,59 @@ void RestClient::clearAdminSession()
         canChangePassword_ = false;
         emit canChangePasswordChanged();
     }
+    stopEventStream();
+}
+
+void RestClient::clearFetchState()
+{
+    devicesFetchInFlight_ = false;
+    devicesFetchDirty_ = false;
+    roomDevicesFetchInFlight_ = false;
+    roomDevicesFetchDirty_ = false;
+    roomDevicesFetchTarget_.clear();
+    pendingRoomDevicesFetchTarget_.clear();
+    alertsFetchInFlight_ = false;
+    alertsFetchDirty_ = false;
+    lockFetchInFlight_ = false;
+    lockFetchDirty_ = false;
+}
+
+void RestClient::scheduleDevicesFetchRetry()
+{
+    if (!devicesFetchDirty_)
+        return;
+    devicesFetchDirty_ = false;
+    QTimer::singleShot(0, this, [this]() { fetchDevices(); });
+}
+
+void RestClient::scheduleRoomDevicesFetchRetry()
+{
+    if (!roomDevicesFetchDirty_)
+        return;
+
+    roomDevicesFetchDirty_ = false;
+    const QString roomId = pendingRoomDevicesFetchTarget_.isEmpty()
+        ? roomDevicesFetchTarget_
+        : pendingRoomDevicesFetchTarget_;
+    pendingRoomDevicesFetchTarget_.clear();
+    if (!roomId.isEmpty())
+        QTimer::singleShot(0, this, [this, roomId]() { fetchDevicesByRoom(roomId); });
+}
+
+void RestClient::scheduleAlertsFetchRetry()
+{
+    if (!alertsFetchDirty_)
+        return;
+    alertsFetchDirty_ = false;
+    QTimer::singleShot(0, this, [this]() { fetchAlerts(); });
+}
+
+void RestClient::scheduleLockFetchRetry()
+{
+    if (!lockFetchDirty_)
+        return;
+    lockFetchDirty_ = false;
+    QTimer::singleShot(0, this, [this]() { fetchLock(); });
 }
 
 // 更新后端地址时，只在真正变化时才通知 QML。
@@ -142,6 +201,14 @@ void RestClient::setBaseUrl(const QString &url)
         return;
     baseUrl_ = normalized;
     emit baseUrlChanged();
+
+    if (eventMode_ != EventStreamMode::None && !stopEventStreamRequested_) {
+        if (eventReply_) {
+            eventReply_->abort();
+        } else {
+            openEventStream();
+        }
+    }
 }
 
 // 所有请求都从这里拼出来，统一处理 Content-Type 和 Authorization 头。
@@ -149,6 +216,16 @@ QNetworkRequest RestClient::makeRequest(const QString &path)
 {
     QNetworkRequest req(QUrl(baseUrl_ + path));
     req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+    if (!token_.isEmpty())
+        req.setRawHeader("Authorization", QString("Bearer %1").arg(token_).toUtf8());
+    return req;
+}
+
+QNetworkRequest RestClient::makeEventRequest(const QString &path)
+{
+    QNetworkRequest req(QUrl(baseUrl_ + path));
+    req.setRawHeader("Accept", "text/event-stream");
+    req.setRawHeader("Cache-Control", "no-cache");
     if (!token_.isEmpty())
         req.setRawHeader("Authorization", QString("Bearer %1").arg(token_).toUtf8());
     return req;
@@ -179,6 +256,7 @@ void RestClient::handleReply(QNetworkReply *reply, const std::function<void(cons
             if (httpStatus == 401 && !token_.isEmpty()) {
                 token_.clear();
                 clearAdminSession();
+                clearFetchState();
                 emit unauthorized(QStringLiteral("登录状态已失效，请重新登录"));
             } else if (httpStatus == 401 && reply->url().path() == "/login") {
                 emit loginFailed(QStringLiteral("用户名或密码错误"));
@@ -191,7 +269,125 @@ void RestClient::handleReply(QNetworkReply *reply, const std::function<void(cons
     });
 }
 
-// 登录接口：成功后保存 token，并拉取锁状态、设备列表和告警列表。
+void RestClient::openEventStream()
+{
+    if (eventMode_ == EventStreamMode::None)
+        return;
+
+    QString path;
+    if (eventMode_ == EventStreamMode::Admin) {
+        if (token_.isEmpty())
+            return;
+        path = QStringLiteral("/events/admin");
+    } else {
+        if (eventRoomId_.isEmpty())
+            return;
+        path = QStringLiteral("/events/classrooms/%1").arg(QString::fromUtf8(QUrl::toPercentEncoding(eventRoomId_)));
+    }
+
+    stopEventStreamRequested_ = false;
+    eventBuffer_.clear();
+    attachEventReply(nam_.get(makeEventRequest(path)));
+}
+
+void RestClient::attachEventReply(QNetworkReply *reply)
+{
+    eventReply_ = reply;
+    QObject::connect(reply, &QNetworkReply::readyRead, this, [this, reply]() {
+        if (reply != eventReply_)
+            return;
+        QByteArray chunk = reply->readAll();
+        chunk.replace("\r", "");
+        eventBuffer_.append(chunk);
+        processEventBuffer();
+    });
+    QObject::connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        if (reply == eventReply_)
+            eventReply_ = nullptr;
+
+        processEventBuffer();
+
+        const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        if ((httpStatus == 401 || httpStatus == 403) && !stopEventStreamRequested_) {
+            if (eventMode_ == EventStreamMode::Admin && !token_.isEmpty()) {
+                token_.clear();
+                clearAdminSession();
+                clearFetchState();
+                emit unauthorized(QStringLiteral("登录状态已失效，请重新登录"));
+            }
+        } else if (!stopEventStreamRequested_ && eventMode_ != EventStreamMode::None) {
+            if (httpStatus != 401 && httpStatus != 403)
+                eventReconnectTimer_.start(1500);
+        }
+        reply->deleteLater();
+    });
+}
+
+void RestClient::processEventBuffer()
+{
+    forever {
+        const int boundary = eventBuffer_.indexOf("\n\n");
+        if (boundary < 0)
+            return;
+
+        const QByteArray rawEvent = eventBuffer_.left(boundary);
+        eventBuffer_.remove(0, boundary + 2);
+        if (rawEvent.trimmed().isEmpty())
+            continue;
+
+        QString eventName;
+        QByteArray dataBytes;
+        const QList<QByteArray> lines = rawEvent.split('\n');
+        for (const auto &line : lines) {
+            if (line.startsWith(':'))
+                continue;
+            if (line.startsWith("event:")) {
+                eventName = QString::fromUtf8(line.mid(6)).trimmed();
+            } else if (line.startsWith("data:")) {
+                const QByteArray value = line.mid(5).trimmed();
+                if (!dataBytes.isEmpty())
+                    dataBytes.append('\n');
+                dataBytes.append(value);
+            }
+        }
+
+        if (eventName.isEmpty() || dataBytes.isEmpty())
+            continue;
+
+        const QJsonDocument doc = QJsonDocument::fromJson(dataBytes);
+        if (!doc.isObject())
+            continue;
+
+        handleServerEvent(eventName, doc.object());
+    }
+}
+
+void RestClient::handleServerEvent(const QString &eventName, const QJsonObject &payload)
+{
+    if (eventName == "devices_changed") {
+        emit serverDevicesChanged(payload.value("room_id").toString());
+        return;
+    }
+
+    if (eventName == "alerts_changed") {
+        emit serverAlertsChanged(payload.value("room_id").toString(),
+                                 payload.value("device_id").toString());
+        return;
+    }
+
+    if (eventName == "lock_changed") {
+        updateLockFromJson(QJsonDocument(payload));
+        emit serverLockChanged(payload.value("locked").toBool(false));
+        return;
+    }
+
+    if (eventName == "registration_changed") {
+        emit serverRegistrationChanged(payload.value("room_id").toString(),
+                                       payload.value("registered").toBool(false));
+    }
+}
+
+// 登录接口：成功后保存 token，由界面层决定何时做首次同步和启动 SSE。
 void RestClient::login(const QString &username, const QString &password)
 {
     setBusy(true);
@@ -208,9 +404,6 @@ void RestClient::login(const QString &username, const QString &password)
         token_ = t;
         updateAdminSessionFromJson(doc);
         emit loginSucceeded();
-        fetchLock();
-        fetchDevices();
-        fetchAlerts();
     });
 }
 
@@ -226,6 +419,7 @@ void RestClient::logout()
     handleReply(reply, [=](const QJsonDocument &) {
         token_.clear();
         clearAdminSession();
+        clearFetchState();
         emit loginFailed(QStringLiteral("已退出登录"));
     });
 }
@@ -233,7 +427,17 @@ void RestClient::logout()
 // 拉取全量设备，用于管理端总览和设备控制页。
 void RestClient::fetchDevices()
 {
+    if (devicesFetchInFlight_) {
+        devicesFetchDirty_ = true;
+        return;
+    }
+    devicesFetchInFlight_ = true;
+
     auto reply = nam_.get(makeRequest("/devices"));
+    QObject::connect(reply, &QNetworkReply::finished, this, [this]() {
+        devicesFetchInFlight_ = false;
+        scheduleDevicesFetchRetry();
+    });
     handleReply(reply, [=](const QJsonDocument &doc) {
         QVariantList list;
         if (doc.isObject()) {
@@ -255,8 +459,21 @@ void RestClient::fetchDevicesByRoom(const QString &roomId)
         emit devicesReceived(QVariantList());
         return;
     }
+
+    if (roomDevicesFetchInFlight_) {
+        roomDevicesFetchDirty_ = true;
+        pendingRoomDevicesFetchTarget_ = roomId;
+        return;
+    }
+
+    roomDevicesFetchInFlight_ = true;
+    roomDevicesFetchTarget_ = roomId;
     const QString encodedRoom = QString::fromUtf8(QUrl::toPercentEncoding(roomId));
     auto reply = nam_.get(makeRequest(QString("/devices?room_id=%1").arg(encodedRoom)));
+    QObject::connect(reply, &QNetworkReply::finished, this, [this]() {
+        roomDevicesFetchInFlight_ = false;
+        scheduleRoomDevicesFetchRetry();
+    });
     handleReply(reply, [=](const QJsonDocument &doc) {
         QVariantList list;
         if (doc.isObject()) {
@@ -274,7 +491,17 @@ void RestClient::fetchDevicesByRoom(const QString &roomId)
 // 拉取告警中心数据。
 void RestClient::fetchAlerts()
 {
+    if (alertsFetchInFlight_) {
+        alertsFetchDirty_ = true;
+        return;
+    }
+    alertsFetchInFlight_ = true;
+
     auto reply = nam_.get(makeRequest("/alerts"));
+    QObject::connect(reply, &QNetworkReply::finished, this, [this]() {
+        alertsFetchInFlight_ = false;
+        scheduleAlertsFetchRetry();
+    });
     handleReply(reply, [=](const QJsonDocument &doc) {
         QVariantList list;
         if (doc.isArray()) {
@@ -288,7 +515,17 @@ void RestClient::fetchAlerts()
 // 拉取当前锁定状态。
 void RestClient::fetchLock()
 {
+    if (lockFetchInFlight_) {
+        lockFetchDirty_ = true;
+        return;
+    }
+    lockFetchInFlight_ = true;
+
     auto reply = nam_.get(makeRequest("/lock"));
+    QObject::connect(reply, &QNetworkReply::finished, this, [this]() {
+        lockFetchInFlight_ = false;
+        scheduleLockFetchRetry();
+    });
     handleReply(reply, [=](const QJsonDocument &doc) {
         updateLockFromJson(doc);
     });
@@ -453,6 +690,42 @@ void RestClient::changeMyPassword(const QString &oldPassword, const QString &new
     handleReply(reply, [=](const QJsonDocument &) {
         emit operationFinished("password_change", QStringLiteral("密码已修改"));
     });
+}
+
+void RestClient::startAdminEventStream()
+{
+    if (eventMode_ == EventStreamMode::Admin && eventReply_)
+        return;
+    stopEventStream();
+    eventMode_ = EventStreamMode::Admin;
+    openEventStream();
+}
+
+void RestClient::startClassroomEventStream(const QString &roomId)
+{
+    const QString normalizedRoom = roomId.trimmed();
+    if (normalizedRoom.isEmpty())
+        return;
+    if (eventMode_ == EventStreamMode::Classroom && eventRoomId_ == normalizedRoom && eventReply_)
+        return;
+    stopEventStream();
+    eventMode_ = EventStreamMode::Classroom;
+    eventRoomId_ = normalizedRoom;
+    openEventStream();
+}
+
+void RestClient::stopEventStream()
+{
+    stopEventStreamRequested_ = true;
+    eventReconnectTimer_.stop();
+    eventBuffer_.clear();
+    eventMode_ = EventStreamMode::None;
+    eventRoomId_.clear();
+    if (eventReply_) {
+        auto reply = eventReply_;
+        eventReply_ = nullptr;
+        reply->abort();
+    }
 }
 
 // 从统一格式的 JSON 中同步锁状态到属性上。

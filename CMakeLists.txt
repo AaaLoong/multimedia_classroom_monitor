@@ -7,6 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 
 find_package(Qt6 REQUIRED COMPONENTS Core Quick Qml QuickControls2 Sql Network Concurrent)
+
 # paho-mqtt-cpp dependency
 find_package(PahoMqttCpp REQUIRED)
 

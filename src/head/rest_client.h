@@ -2,8 +2,10 @@
 
 #include <QObject>
 #include <QJsonDocument>
+#include <QByteArray>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
+#include <QTimer>
 #include <QVariant>
 #include <functional>
 
@@ -59,6 +61,9 @@ public:
     Q_INVOKABLE void createAdminUser(const QString &username, const QString &password);
     Q_INVOKABLE void deleteAdminUser(const QString &username);
     Q_INVOKABLE void changeMyPassword(const QString &oldPassword, const QString &newPassword);
+    Q_INVOKABLE void startAdminEventStream();
+    Q_INVOKABLE void startClassroomEventStream(const QString &roomId);
+    Q_INVOKABLE void stopEventStream();
 
 signals:
     // 这些信号用于把后端数据返回到 QML 页面。
@@ -79,8 +84,18 @@ signals:
     void operationFinished(const QString &action, const QString &message);
     void error(const QString &message);
     void adminUsersReceived(const QVariantList &admins);
+    void serverDevicesChanged(const QString &roomId);
+    void serverAlertsChanged(const QString &roomId, const QString &deviceId);
+    void serverLockChanged(bool locked);
+    void serverRegistrationChanged(const QString &roomId, bool registered);
 
 private:
+    enum class EventStreamMode {
+        None,
+        Admin,
+        Classroom,
+    };
+
     QString baseUrl_ = QStringLiteral("http://127.0.0.1:8080");
     QString token_;
     bool locked_ = false;
@@ -92,13 +107,39 @@ private:
     bool canManageAdmins_ = false;
     bool canChangePassword_ = false;
     QNetworkAccessManager nam_;
+    QTimer eventReconnectTimer_;
+    QNetworkReply *eventReply_ = nullptr;
+    QByteArray eventBuffer_;
+    EventStreamMode eventMode_ = EventStreamMode::None;
+    QString eventRoomId_;
+    bool stopEventStreamRequested_ = false;
+    bool devicesFetchInFlight_ = false;
+    bool devicesFetchDirty_ = false;
+    bool roomDevicesFetchInFlight_ = false;
+    bool roomDevicesFetchDirty_ = false;
+    QString roomDevicesFetchTarget_;
+    QString pendingRoomDevicesFetchTarget_;
+    bool alertsFetchInFlight_ = false;
+    bool alertsFetchDirty_ = false;
+    bool lockFetchInFlight_ = false;
+    bool lockFetchDirty_ = false;
 
     // 内部工具函数：拼请求、处理响应、同步状态。
     QNetworkRequest makeRequest(const QString &path);
+    QNetworkRequest makeEventRequest(const QString &path);
     void setBusy(bool busy);
     void handleReply(QNetworkReply *reply, const std::function<void(const QJsonDocument &)> &onOk);
     void updateLockFromJson(const QJsonDocument &doc);
     void updateRegistrationFromJson(const QJsonDocument &doc);
     void updateAdminSessionFromJson(const QJsonDocument &doc);
     void clearAdminSession();
+    void clearFetchState();
+    void scheduleDevicesFetchRetry();
+    void scheduleRoomDevicesFetchRetry();
+    void scheduleAlertsFetchRetry();
+    void scheduleLockFetchRetry();
+    void openEventStream();
+    void attachEventReply(QNetworkReply *reply);
+    void processEventBuffer();
+    void handleServerEvent(const QString &eventName, const QJsonObject &payload);
 };

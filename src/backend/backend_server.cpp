@@ -9,18 +9,29 @@
 #include <QJsonObject>
 #include <QMutex>
 #include <QMutexLocker>
+#include <QReadWriteLock>
+#include <QReadLocker>
+#include <QWriteLocker>
 #include <QQueue>
 #include <QRandomGenerator>
 #include <QSet>
 #include <QThread>
+#include <QTimer>
 #include <QUuid>
+#include <QVector>
 #include <QWaitCondition>
 #include <QPasswordDigestor>
 #include <QRegularExpression>
 #include <QtGlobal>
 #include <QtConcurrent>
 #include <atomic>
+#include <algorithm>
+#include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <functional>
 #include <memory>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -66,6 +77,28 @@ struct AdminSession {
     bool canChangePassword = true;
     QDateTime issuedAt;
     QDateTime expiresAt;
+};
+
+struct SseEventClient {
+    QString id;
+    QString roomId;
+    bool admin = false;
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::deque<QByteArray> queue;
+    bool closed = false;
+};
+
+struct RoomRuntime {
+    mutable QReadWriteLock lock;
+    QHash<QString, DeviceState> devices;
+};
+
+struct PendingStateUpdate {
+    QString roomId;
+    QString deviceId;
+    DeviceState state;
+    qint64 dueAtMs = 0;
 };
 
 // 把设备状态转换成系统内部统一使用的英文状态码。
@@ -157,6 +190,9 @@ public:
         if (!okThreads || port_ <= 0)
             port_ = 8080;
         server_ = std::make_unique<httplib::Server>();
+        stateFlushTimer_.setInterval(100);
+        connect(&stateFlushTimer_, &QTimer::timeout, this, &BackendServer::flushPendingStateUpdates);
+        stateFlushTimer_.start();
         bindRoutes();
     }
 
@@ -164,13 +200,17 @@ public:
     ~BackendServer() override
     {
         stopWorkers_ = true;
+        stopPersist_ = true;
         commandCv_.wakeAll();
+        persistCv_.notify_all();
         for (auto &t : workerThreads_) {
             if (t.joinable())
                 t.join();
         }
         if (timeoutThread_.joinable())
             timeoutThread_.join();
+        if (persistThread_.joinable())
+            persistThread_.join();
     }
 
     // 真正启动后端：初始化数据库、恢复任务、启动线程、开始监听端口。
@@ -193,6 +233,15 @@ public:
         {
             QMutexLocker locker(&dataMutex_);
             locked_ = db_.locked();
+            const auto classrooms = db_.loadRegisteredClassrooms();
+            for (const auto &item : classrooms) {
+                const auto obj = item.toObject();
+                const QString roomId = obj.value("room_id").toString();
+                if (!roomId.isEmpty()) {
+                    registeredRooms_.insert(roomId);
+                    ensureRoomRuntimeLocked(roomId);
+                }
+            }
             const auto arr = db_.loadDevices();
             for (const auto &item : arr) {
                 const auto obj = item.toObject();
@@ -200,14 +249,17 @@ public:
                 s.name = obj.value("name").toString();
                 s.status = obj.value("status").toString();
                 s.updated = obj.value("updated").toString();
-                const QString key = obj.value("room_id").toString() + "::" + obj.value("device_id").toString();
-                devices_[key] = s;
+                const QString roomId = obj.value("room_id").toString();
+                const QString deviceId = obj.value("device_id").toString();
+                auto runtime = ensureRoomRuntimeLocked(roomId);
+                runtime->devices.insert(deviceId, s);
             }
         }
 
         restoreRecoverableCommands();
         startWorkers();
         startTimeoutLoop();
+        startPersistWorker();
 
         qInfo("backend listen on http://%s:%d", qPrintable(bindHost_), port_);
         if (!server_->listen(bindHost_.toStdString(), port_)) {
@@ -224,20 +276,417 @@ private:
     mutable QMutex dataMutex_;
     mutable QMutex commandMutex_;
     mutable QMutex sessionMutex_;
+    mutable QMutex eventMutex_;
     QWaitCondition commandCv_;
-    QHash<QString, DeviceState> devices_;
+    QHash<QString, std::shared_ptr<RoomRuntime>> roomRuntimes_;
+    QSet<QString> registeredRooms_;
     QHash<QString, CommandRuntime> commandJobs_;
+    QHash<QString, QDateTime> recentCommandWindows_;
     QHash<QString, AdminSession> sessions_;
+    QHash<QString, std::shared_ptr<SseEventClient>> adminEventClients_;
+    QHash<QString, std::shared_ptr<SseEventClient>> classroomEventClients_;
     QQueue<QString> commandQueue_;
+    QTimer stateFlushTimer_;
+    QHash<QString, PendingStateUpdate> pendingStateUpdates_;
+    QSet<QString> pendingDeviceBroadcastRooms_;
+    std::mutex persistMutex_;
+    std::condition_variable persistCv_;
+    std::deque<std::function<void()>> pendingPersistQueue_;
     std::vector<std::thread> workerThreads_;
     std::thread timeoutThread_;
+    std::thread persistThread_;
     std::atomic_bool stopWorkers_ = false;
+    std::atomic_bool stopPersist_ = false;
     bool locked_ = false;
     int commandWorkerCount_ = 8;
     int queueLimit_ = 2000;
     int dedupWindowSec_ = 3;
     QString bindHost_;
     int port_ = 8080;
+
+    std::shared_ptr<RoomRuntime> ensureRoomRuntimeLocked(const QString &roomId)
+    {
+        auto runtime = roomRuntimes_.value(roomId);
+        if (!runtime) {
+            runtime = std::make_shared<RoomRuntime>();
+            roomRuntimes_.insert(roomId, runtime);
+        }
+        return runtime;
+    }
+
+    std::shared_ptr<RoomRuntime> roomRuntime(const QString &roomId) const
+    {
+        QMutexLocker locker(&dataMutex_);
+        return roomRuntimes_.value(roomId);
+    }
+
+    void markRoomRegistered(const QString &roomId, bool registered)
+    {
+        QMutexLocker locker(&dataMutex_);
+        if (registered) {
+            registeredRooms_.insert(roomId);
+            ensureRoomRuntimeLocked(roomId);
+        } else {
+            registeredRooms_.remove(roomId);
+            roomRuntimes_.remove(roomId);
+        }
+    }
+
+    bool isRoomRegistered(const QString &roomId) const
+    {
+        QMutexLocker locker(&dataMutex_);
+        return registeredRooms_.contains(roomId);
+    }
+
+    bool lockedState() const
+    {
+        QMutexLocker locker(&dataMutex_);
+        return locked_;
+    }
+
+    void setLockedState(bool locked)
+    {
+        QMutexLocker locker(&dataMutex_);
+        locked_ = locked;
+    }
+
+    void setRuntimeDeviceState(const QString &roomId, const QString &deviceId, const DeviceState &state)
+    {
+        std::shared_ptr<RoomRuntime> runtime;
+        {
+            QMutexLocker locker(&dataMutex_);
+            runtime = ensureRoomRuntimeLocked(roomId);
+        }
+        QWriteLocker roomLocker(&runtime->lock);
+        runtime->devices.insert(deviceId, state);
+    }
+
+    void removeRuntimeRoom(const QString &roomId)
+    {
+        QMutexLocker locker(&dataMutex_);
+        roomRuntimes_.remove(roomId);
+    }
+
+    QHash<QString, DeviceState> deviceSnapshotForRoom(const QString &roomId) const
+    {
+        const auto runtime = roomRuntime(roomId);
+        if (!runtime)
+            return {};
+
+        QReadLocker locker(&runtime->lock);
+        return runtime->devices;
+    }
+
+    QList<QPair<QString, QHash<QString, DeviceState>>> deviceSnapshotAll() const
+    {
+        QVector<QPair<QString, std::shared_ptr<RoomRuntime>>> runtimes;
+        {
+            QMutexLocker locker(&dataMutex_);
+            QStringList roomIds = roomRuntimes_.keys();
+            std::sort(roomIds.begin(), roomIds.end());
+            runtimes.reserve(roomIds.size());
+            for (const auto &roomId : roomIds) {
+                const auto runtime = roomRuntimes_.value(roomId);
+                if (runtime)
+                    runtimes.push_back(qMakePair(roomId, runtime));
+            }
+        }
+
+        QList<QPair<QString, QHash<QString, DeviceState>>> snapshots;
+        snapshots.reserve(runtimes.size());
+        for (const auto &entry : runtimes) {
+            QReadLocker roomLocker(&entry.second->lock);
+            snapshots.push_back(qMakePair(entry.first, entry.second->devices));
+        }
+        return snapshots;
+    }
+
+    QJsonArray deviceJsonForRoomSnapshot(const QString &roomId, const QHash<QString, DeviceState> &snapshot) const
+    {
+        QJsonArray arr;
+        QStringList deviceIds = snapshot.keys();
+        std::sort(deviceIds.begin(), deviceIds.end());
+        for (const auto &deviceId : deviceIds) {
+            const auto state = snapshot.value(deviceId);
+            QJsonObject obj;
+            obj["room_id"] = roomId;
+            obj["device_id"] = deviceId;
+            obj["name"] = state.name;
+            obj["status"] = state.status;
+            obj["updated"] = state.updated;
+            arr.append(obj);
+        }
+        return arr;
+    }
+
+    QJsonArray deviceJsonForAllSnapshot(const QList<QPair<QString, QHash<QString, DeviceState>>> &snapshot) const
+    {
+        QJsonArray arr;
+        for (const auto &roomSnapshot : snapshot) {
+            const auto roomArr = deviceJsonForRoomSnapshot(roomSnapshot.first, roomSnapshot.second);
+            for (const auto &item : roomArr)
+                arr.append(item);
+        }
+        return arr;
+    }
+
+    void pruneRecentCommandWindowsLocked(const QDateTime &now)
+    {
+        QStringList expiredKeys;
+        for (auto it = recentCommandWindows_.cbegin(); it != recentCommandWindows_.cend(); ++it) {
+            if (it.value() <= now)
+                expiredKeys.append(it.key());
+        }
+        for (const auto &key : expiredKeys)
+            recentCommandWindows_.remove(key);
+    }
+
+    void rememberRecentCommandLocked(const QString &dedupKey, const QDateTime &baseTime)
+    {
+        recentCommandWindows_[dedupKey] = baseTime.addSecs(dedupWindowSec_);
+    }
+
+    void enqueuePersistTask(std::function<void()> task)
+    {
+        {
+            std::lock_guard<std::mutex> lock(persistMutex_);
+            pendingPersistQueue_.push_back(std::move(task));
+        }
+        persistCv_.notify_one();
+    }
+
+    void persistCommandEventAsync(const QString &commandId,
+                                  const QString &fromState,
+                                  const QString &toState,
+                                  const QString &reason,
+                                  int retryNo)
+    {
+        enqueuePersistTask([this, commandId, fromState, toState, reason, retryNo]() {
+            db_.appendCommandEvent(commandId, fromState, toState, reason, retryNo);
+        });
+    }
+
+    void persistCommandStateAsync(const QString &commandId,
+                                  const QString &state,
+                                  int retryCount,
+                                  const QString &errorCode = QString(),
+                                  const QString &errorMessage = QString(),
+                                  const QDateTime &deadlineAt = QDateTime())
+    {
+        enqueuePersistTask([this, commandId, state, retryCount, errorCode, errorMessage, deadlineAt]() {
+            db_.updateCommandJob(commandId, state, retryCount, errorCode, errorMessage, deadlineAt);
+        });
+    }
+
+    void persistOperationAsync(const QString &roomId, const QString &deviceId, const QString &action, int delayMs)
+    {
+        enqueuePersistTask([this, roomId, deviceId, action, delayMs]() {
+            db_.recordOperation(roomId, deviceId, action, delayMs);
+        });
+    }
+
+    void startPersistWorker()
+    {
+        stopPersist_ = false;
+        persistThread_ = std::thread([this]() {
+            while (true) {
+                std::deque<std::function<void()>> batch;
+                {
+                    std::unique_lock<std::mutex> lock(persistMutex_);
+                    persistCv_.wait_for(lock, std::chrono::milliseconds(100), [&]() {
+                        return stopPersist_ || !pendingPersistQueue_.empty();
+                    });
+                    if (pendingPersistQueue_.empty() && stopPersist_)
+                        break;
+                    batch.swap(pendingPersistQueue_);
+                }
+
+                for (auto &task : batch) {
+                    if (task)
+                        task();
+                }
+            }
+        });
+    }
+
+    void flushPendingStateUpdates()
+    {
+        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+        QStringList readyKeys;
+        for (auto it = pendingStateUpdates_.cbegin(); it != pendingStateUpdates_.cend(); ++it) {
+            if (it.value().dueAtMs <= nowMs)
+                readyKeys.append(it.key());
+        }
+
+        for (const auto &key : readyKeys) {
+            const auto pending = pendingStateUpdates_.take(key);
+            if (!isRoomRegistered(pending.roomId))
+                continue;
+            enqueuePersistTask([this, pending]() {
+                db_.upsertDevice(pending.roomId, pending.deviceId, pending.state.name, pending.state.status);
+            });
+            pendingDeviceBroadcastRooms_.insert(pending.roomId);
+        }
+
+        const auto rooms = pendingDeviceBroadcastRooms_.values();
+        pendingDeviceBroadcastRooms_.clear();
+        for (const auto &roomId : rooms)
+            broadcastDevicesChanged(roomId);
+    }
+
+    QByteArray encodeSseEvent(const QString &eventName, const QJsonObject &payload) const
+    {
+        QByteArray bytes;
+        bytes.append("event: ");
+        bytes.append(eventName.toUtf8());
+        bytes.append("\n");
+        bytes.append("data: ");
+        bytes.append(QJsonDocument(payload).toJson(QJsonDocument::Compact));
+        bytes.append("\n\n");
+        return bytes;
+    }
+
+    void removeEventClient(const QString &clientId, bool adminClient)
+    {
+        std::shared_ptr<SseEventClient> client;
+        {
+            QMutexLocker locker(&eventMutex_);
+            if (adminClient)
+                client = adminEventClients_.take(clientId);
+            else
+                client = classroomEventClients_.take(clientId);
+        }
+
+        if (!client)
+            return;
+
+        {
+            std::lock_guard<std::mutex> lock(client->mutex);
+            client->closed = true;
+        }
+        client->cv.notify_all();
+    }
+
+    void enqueueEventForClient(const std::shared_ptr<SseEventClient> &client, const QByteArray &payload)
+    {
+        if (!client)
+            return;
+
+        {
+            std::lock_guard<std::mutex> lock(client->mutex);
+            if (client->closed)
+                return;
+            if (client->queue.size() >= 64)
+                client->queue.pop_front();
+            client->queue.push_back(payload);
+        }
+        client->cv.notify_all();
+    }
+
+    bool streamEventClient(const std::shared_ptr<SseEventClient> &client, httplib::DataSink &sink)
+    {
+        QByteArray payload;
+        {
+            std::unique_lock<std::mutex> lock(client->mutex);
+            if (client->queue.empty() && !client->closed) {
+                client->cv.wait_for(lock, std::chrono::seconds(15), [&]() {
+                    return client->closed || !client->queue.empty();
+                });
+            }
+
+            if (client->closed) {
+                sink.done();
+                return true;
+            }
+
+            if (!client->queue.empty()) {
+                payload = client->queue.front();
+                client->queue.pop_front();
+            }
+        }
+
+        if (payload.isEmpty())
+            payload = QByteArrayLiteral(": keepalive\n\n");
+
+        if (sink.is_writable && !sink.is_writable())
+            return false;
+        return sink.write(payload.constData(), size_t(payload.size()));
+    }
+
+    void broadcastAdminEvent(const QString &eventName, const QJsonObject &payload)
+    {
+        QVector<std::shared_ptr<SseEventClient>> clients;
+        {
+            QMutexLocker locker(&eventMutex_);
+            clients.reserve(adminEventClients_.size());
+            for (auto it = adminEventClients_.cbegin(); it != adminEventClients_.cend(); ++it)
+                clients.push_back(it.value());
+        }
+
+        const QByteArray data = encodeSseEvent(eventName, payload);
+        for (const auto &client : clients)
+            enqueueEventForClient(client, data);
+    }
+
+    void broadcastClassroomEvent(const QString &roomId, const QString &eventName, const QJsonObject &payload)
+    {
+        QVector<std::shared_ptr<SseEventClient>> clients;
+        {
+            QMutexLocker locker(&eventMutex_);
+            clients.reserve(classroomEventClients_.size());
+            for (auto it = classroomEventClients_.cbegin(); it != classroomEventClients_.cend(); ++it) {
+                if (it.value() && it.value()->roomId == roomId)
+                    clients.push_back(it.value());
+            }
+        }
+
+        const QByteArray data = encodeSseEvent(eventName, payload);
+        for (const auto &client : clients)
+            enqueueEventForClient(client, data);
+    }
+
+    void broadcastDevicesChanged(const QString &roomId)
+    {
+        const QJsonObject payload{{"room_id", roomId}};
+        broadcastAdminEvent("devices_changed", payload);
+        broadcastClassroomEvent(roomId, "devices_changed", payload);
+    }
+
+    void broadcastAlertsChanged(const QString &roomId, const QString &deviceId)
+    {
+        const QJsonObject payload{
+            {"room_id", roomId},
+            {"device_id", deviceId}
+        };
+        broadcastAdminEvent("alerts_changed", payload);
+    }
+
+    void broadcastLockChanged()
+    {
+        const bool lockedValue = lockedState();
+        const QJsonObject payload{{"locked", lockedValue}};
+        broadcastAdminEvent("lock_changed", payload);
+        QVector<std::shared_ptr<SseEventClient>> clients;
+        {
+            QMutexLocker locker(&eventMutex_);
+            clients.reserve(classroomEventClients_.size());
+            for (auto it = classroomEventClients_.cbegin(); it != classroomEventClients_.cend(); ++it)
+                clients.push_back(it.value());
+        }
+        const QByteArray data = encodeSseEvent("lock_changed", payload);
+        for (const auto &client : clients)
+            enqueueEventForClient(client, data);
+    }
+
+    void broadcastRegistrationChanged(const QString &roomId, bool registered)
+    {
+        const QJsonObject payload{
+            {"room_id", roomId},
+            {"registered", registered}
+        };
+        broadcastAdminEvent("registration_changed", payload);
+        broadcastClassroomEvent(roomId, "registration_changed", payload);
+    }
 
     /*
      * HTTP 路由注册区。
@@ -255,10 +704,7 @@ private:
 
         server_->Get("/lock", [&](const httplib::Request &, httplib::Response &res) {
             QJsonObject obj;
-            {
-                QMutexLocker locker(&dataMutex_);
-                obj["locked"] = locked_;
-            }
+            obj["locked"] = lockedState();
             respondJson(res, QJsonDocument(obj));
         });
 
@@ -292,6 +738,64 @@ private:
                 return;
             }
             respondJson(res, QJsonDocument(QJsonObject{{"status", "logged_out"}}));
+        });
+
+        server_->Get("/events/admin", [&](const httplib::Request &req, httplib::Response &res) {
+            AdminSession session;
+            if (!currentSession(req, &session)) {
+                respondError(res, "unauthorized", 401);
+                return;
+            }
+
+            auto client = std::make_shared<SseEventClient>();
+            client->id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            client->admin = true;
+            enqueueEventForClient(client, QByteArrayLiteral(": connected\n\n"));
+            {
+                QMutexLocker locker(&eventMutex_);
+                adminEventClients_.insert(client->id, client);
+            }
+
+            res.set_header("Cache-Control", "no-cache");
+            res.set_header("Connection", "keep-alive");
+            res.set_header("X-Accel-Buffering", "no");
+            res.set_chunked_content_provider(
+                "text/event-stream",
+                [this, client](size_t, httplib::DataSink &sink) {
+                    return streamEventClient(client, sink);
+                },
+                [this, client](bool) {
+                    removeEventClient(client->id, true);
+                });
+        });
+
+        server_->Get(R"(/events/classrooms/([\w\-]+))", [&](const httplib::Request &req, httplib::Response &res) {
+            const QString roomId = QString::fromStdString(req.matches[1]).trimmed();
+            if (roomId.isEmpty() || !isRoomRegistered(roomId)) {
+                respondError(res, "forbidden", 403);
+                return;
+            }
+
+            auto client = std::make_shared<SseEventClient>();
+            client->id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            client->roomId = roomId;
+            enqueueEventForClient(client, QByteArrayLiteral(": connected\n\n"));
+            {
+                QMutexLocker locker(&eventMutex_);
+                classroomEventClients_.insert(client->id, client);
+            }
+
+            res.set_header("Cache-Control", "no-cache");
+            res.set_header("Connection", "keep-alive");
+            res.set_header("X-Accel-Buffering", "no");
+            res.set_chunked_content_provider(
+                "text/event-stream",
+                [this, client](size_t, httplib::DataSink &sink) {
+                    return streamEventClient(client, sink);
+                },
+                [this, client](bool) {
+                    removeEventClient(client->id, false);
+                });
         });
 
         server_->Get("/admin-users", [&](const httplib::Request &req, httplib::Response &res) {
@@ -432,11 +936,9 @@ private:
                 respondError(res, "unauthorized", 401);
                 return;
             }
-            {
-                QMutexLocker locker(&dataMutex_);
-                locked_ = true;
-            }
+            setLockedState(true);
             db_.setLock(true);
+            broadcastLockChanged();
             respondJson(res, QJsonDocument(QJsonObject{{"status", "locked"}, {"locked", true}}));
         });
 
@@ -445,11 +947,9 @@ private:
                 respondError(res, "unauthorized", 401);
                 return;
             }
-            {
-                QMutexLocker locker(&dataMutex_);
-                locked_ = false;
-            }
+            setLockedState(false);
             db_.setLock(false);
+            broadcastLockChanged();
             respondJson(res, QJsonDocument(QJsonObject{{"status", "unlocked"}, {"locked", false}}));
         });
 
@@ -482,7 +982,7 @@ private:
 
         server_->Post(R"(/heartbeat/([\w\-]+))", [&](const httplib::Request &req, httplib::Response &res) {
             const QString roomId = QString::fromStdString(req.matches[1]);
-            if (!db_.isClassroomRegistered(roomId)) {
+            if (!isRoomRegistered(roomId)) {
                 respondJson(res, QJsonDocument(QJsonObject{{"error", "room_not_registered"}}), 403);
                 return;
             }
@@ -492,7 +992,7 @@ private:
 
         server_->Get(R"(/classrooms/([\w\-]+)/registration)", [&](const httplib::Request &req, httplib::Response &res) {
             const QString roomId = QString::fromStdString(req.matches[1]);
-            const bool registered = db_.isClassroomRegistered(roomId);
+            const bool registered = isRoomRegistered(roomId);
             respondJson(res, QJsonDocument(QJsonObject{
                              {"room_id", roomId},
                              {"registered", registered}
@@ -510,7 +1010,10 @@ private:
                 respondJson(res, QJsonDocument(QJsonObject{{"error", "register_failed"}}), 500);
                 return;
             }
+            markRoomRegistered(roomId, true);
             seedRuntimeDevicesForRoom(roomId);
+            broadcastRegistrationChanged(roomId, true);
+            broadcastDevicesChanged(roomId);
             respondJson(res, QJsonDocument(QJsonObject{
                              {"room_id", roomId},
                              {"registered", true},
@@ -529,7 +1032,10 @@ private:
                 respondJson(res, QJsonDocument(QJsonObject{{"error", "unregister_failed"}}), 500);
                 return;
             }
+            markRoomRegistered(roomId, false);
             purgeRuntimeForRoom(roomId);
+            broadcastRegistrationChanged(roomId, false);
+            broadcastDevicesChanged(roomId);
             respondJson(res, QJsonDocument(QJsonObject{
                              {"room_id", roomId},
                              {"registered", false},
@@ -539,19 +1045,16 @@ private:
 
         // 设备控制命令会进入命令队列，由后台工作线程异步发送到 MQTT。
         server_->Post(R"(/devices/([\w\-]+)/([\w\-]+)/command)", [&](const httplib::Request &req, httplib::Response &res) {
-            {
-                QMutexLocker locker(&dataMutex_);
-                if (locked_) {
-                    respondJson(res, QJsonDocument(QJsonObject{{"error", "locked"}}), 423);
-                    return;
-                }
+            if (lockedState()) {
+                respondJson(res, QJsonDocument(QJsonObject{{"error", "locked"}}), 423);
+                return;
             }
 
             const auto body = QJsonDocument::fromJson(QByteArray::fromStdString(req.body)).object();
             const QString action = body.value("action").toString();
             const QString roomId = QString::fromStdString(req.matches[1]);
             const QString deviceId = QString::fromStdString(req.matches[2]);
-            if (!db_.isClassroomRegistered(roomId)) {
+            if (!isRoomRegistered(roomId)) {
                 respondJson(res, QJsonDocument(QJsonObject{{"error", "room_not_registered"}}), 403);
                 return;
             }
@@ -560,10 +1063,6 @@ private:
                 return;
             }
             const QString dedupKey = QString("%1::%2::%3").arg(roomId, deviceId, action.toLower());
-            if (db_.hasRecentCommand(dedupKey, dedupWindowSec_)) {
-                respondJson(res, QJsonDocument(QJsonObject{{"error", "duplicate_command"}}), 409);
-                return;
-            }
 
             CommandRuntime job;
             job.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
@@ -580,15 +1079,27 @@ private:
 
             {
                 QMutexLocker locker(&commandMutex_);
+                pruneRecentCommandWindowsLocked(job.createdAt);
+                if (recentCommandWindows_.contains(dedupKey)) {
+                    respondJson(res, QJsonDocument(QJsonObject{{"error", "duplicate_command"}}), 409);
+                    return;
+                }
                 if (commandQueue_.size() >= queueLimit_) {
                     respondJson(res, QJsonDocument(QJsonObject{{"error", "queue_busy"}}), 503);
                     return;
                 }
                 commandJobs_[job.id] = job;
+                rememberRecentCommandLocked(dedupKey, job.createdAt);
             }
 
-            db_.createCommandJob(job.id, roomId, deviceId, action, "accepted", job.maxRetry, job.timeoutMs, dedupKey);
-            db_.appendCommandEvent(job.id, "", "accepted", "api_accept", 0);
+            if (!db_.createCommandJob(job.id, roomId, deviceId, action, "accepted", job.maxRetry, job.timeoutMs, dedupKey)) {
+                QMutexLocker locker(&commandMutex_);
+                commandJobs_.remove(job.id);
+                recentCommandWindows_.remove(dedupKey);
+                respondJson(res, QJsonDocument(QJsonObject{{"error", "create_command_failed"}}), 500);
+                return;
+            }
+            persistCommandEventAsync(job.id, "", "accepted", "api_accept", 0);
             moveToQueued(job.id, "api_accept");
 
             respondJson(res, QJsonDocument(QJsonObject{
@@ -615,23 +1126,22 @@ private:
 
         // 报修接口会同时写告警和 MQTT 告警，保证管理端和仿真端都能看到。
         server_->Post(R"(/devices/([\w\-]+)/([\w\-]+)/report)", [&](const httplib::Request &req, httplib::Response &res) {
-            {
-                QMutexLocker locker(&dataMutex_);
-                if (locked_) {
-                    respondJson(res, QJsonDocument(QJsonObject{{"error", "locked"}}), 423);
-                    return;
-                }
+            if (lockedState()) {
+                respondJson(res, QJsonDocument(QJsonObject{{"error", "locked"}}), 423);
+                return;
             }
             const QString roomId = QString::fromStdString(req.matches[1]);
             const QString deviceId = QString::fromStdString(req.matches[2]);
-            if (!db_.isClassroomRegistered(roomId)) {
+            if (!isRoomRegistered(roomId)) {
                 respondJson(res, QJsonDocument(QJsonObject{{"error", "room_not_registered"}}), 403);
                 return;
             }
             const auto body = QJsonDocument::fromJson(QByteArray::fromStdString(req.body)).object();
             const QString msg = body.value("message").toString("报修");
-            mqtt_.publishReport(roomId, deviceId, msg);
-            db_.insertAlert(roomId, deviceId, msg, "repair");
+            if (!mqtt_.publishReport(roomId, deviceId, msg)) {
+                respondJson(res, QJsonDocument(QJsonObject{{"error", "report_publish_failed"}}), 503);
+                return;
+            }
             respondJson(res, QJsonDocument(QJsonObject{{"status", "submitted"}}));
         });
     }
@@ -693,6 +1203,8 @@ private:
             {
                 QMutexLocker locker(&commandMutex_);
                 commandJobs_[job.id] = job;
+                if (!job.dedupKey.isEmpty() && job.createdAt.isValid() && job.createdAt.addSecs(dedupWindowSec_) > now)
+                    rememberRecentCommandLocked(job.dedupKey, job.createdAt);
             }
 
             if (job.state == "accepted" || job.state == "queued" || job.state == "timeout") {
@@ -860,12 +1372,8 @@ private:
             respondError(res, "unauthorized", 401);
             return;
         }
-        if (!roomFilter.isEmpty() && !isAdmin && !db_.isClassroomRegistered(roomFilter)) {
-            bool lockedCopy = false;
-            {
-                QMutexLocker locker(&dataMutex_);
-                lockedCopy = locked_;
-            }
+        const bool lockedCopy = lockedState();
+        if (!roomFilter.isEmpty() && !isAdmin && !isRoomRegistered(roomFilter)) {
             QJsonObject resp;
             resp["locked"] = lockedCopy;
             resp["devices"] = QJsonArray();
@@ -873,26 +1381,10 @@ private:
             return;
         }
         QJsonArray arr;
-        bool lockedCopy = false;
-        {
-            QMutexLocker locker(&dataMutex_);
-            lockedCopy = locked_;
-            if (!locked_ || isAdmin) {
-                for (auto it = devices_.cbegin(); it != devices_.cend(); ++it) {
-                    const auto parts = it.key().split("::");
-                    if (parts.size() != 2)
-                        continue;
-                    if (!roomFilter.isEmpty() && parts.at(0) != roomFilter)
-                        continue;
-                    QJsonObject o;
-                    o["room_id"] = parts.at(0);
-                    o["device_id"] = parts.at(1);
-                    o["name"] = it.value().name;
-                    o["status"] = it.value().status;
-                    o["updated"] = it.value().updated;
-                    arr.append(o);
-                }
-            }
+        if (!lockedCopy || isAdmin) {
+            arr = roomFilter.isEmpty()
+                ? deviceJsonForAllSnapshot(deviceSnapshotAll())
+                : deviceJsonForRoomSnapshot(roomFilter, deviceSnapshotForRoom(roomFilter));
         }
         QJsonObject resp;
         resp["locked"] = lockedCopy;
@@ -903,17 +1395,7 @@ private:
     // 教室取消注册时，要把该教室的运行态、命令和队列一起清理掉。
     void purgeRuntimeForRoom(const QString &roomId)
     {
-        {
-            QMutexLocker locker(&dataMutex_);
-            const QString prefix = roomId + "::";
-            QStringList keysToRemove;
-            for (auto it = devices_.cbegin(); it != devices_.cend(); ++it) {
-                if (it.key().startsWith(prefix))
-                    keysToRemove.append(it.key());
-            }
-            for (const auto &k : keysToRemove)
-                devices_.remove(k);
-        }
+        removeRuntimeRoom(roomId);
 
         {
             QMutexLocker locker(&commandMutex_);
@@ -942,18 +1424,21 @@ private:
     {
         const QList<Device> defaults = defaultDevicesForRoom(roomId);
         const QString updatedAt = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
-
-        QMutexLocker locker(&dataMutex_);
+        auto runtime = roomRuntime(roomId);
+        if (!runtime) {
+            QMutexLocker locker(&dataMutex_);
+            runtime = ensureRoomRuntimeLocked(roomId);
+        }
+        QWriteLocker roomLocker(&runtime->lock);
         for (const auto &device : defaults) {
-            const QString key = roomId + "::" + device.id;
-            if (devices_.contains(key))
+            if (runtime->devices.contains(device.id))
                 continue;
 
             DeviceState state;
             state.name = device.name;
             state.status = "off";
             state.updated = updatedAt;
-            devices_.insert(key, state);
+            runtime->devices.insert(device.id, state);
         }
     }
 
@@ -980,18 +1465,23 @@ private:
     // 把命令任务从当前状态推进到 queued，并送进工作队列。
     void moveToQueued(const QString &commandId, const QString &reason)
     {
+        QString jobId;
+        QString fromState;
+        int retryCount = 0;
         {
             QMutexLocker locker(&commandMutex_);
             if (!commandJobs_.contains(commandId))
                 return;
             auto &job = commandJobs_[commandId];
-            const QString fromState = job.state;
+            fromState = job.state;
             job.state = "queued";
             job.updatedAt = QDateTime::currentDateTimeUtc();
-            db_.updateCommandJob(job.id, job.state, job.retryCount);
-            db_.appendCommandEvent(job.id, fromState, "queued", reason, job.retryCount);
+            jobId = job.id;
+            retryCount = job.retryCount;
             commandQueue_.enqueue(job.id);
         }
+        persistCommandStateAsync(jobId, "queued", retryCount);
+        persistCommandEventAsync(jobId, fromState, "queued", reason, retryCount);
         commandCv_.wakeOne();
     }
 
@@ -999,6 +1489,7 @@ private:
     void dispatchCommand(const QString &commandId)
     {
         CommandRuntime snapshot;
+        QString fromState;
         {
             QMutexLocker locker(&commandMutex_);
             if (!commandJobs_.contains(commandId))
@@ -1006,17 +1497,17 @@ private:
             auto &job = commandJobs_[commandId];
             if (job.state != "queued")
                 return;
-            const QString fromState = job.state;
+            fromState = job.state;
             job.state = "sent";
             job.updatedAt = QDateTime::currentDateTimeUtc();
             job.deadlineAt = QDateTime::currentDateTimeUtc().addMSecs(job.timeoutMs);
-            db_.updateCommandJob(job.id, "sent", job.retryCount, "", "", job.deadlineAt);
-            db_.appendCommandEvent(job.id, fromState, "sent", "worker_dispatch", job.retryCount);
             snapshot = job;
         }
 
+        db_.updateCommandJob(snapshot.id, "sent", snapshot.retryCount, "", "", snapshot.deadlineAt);
+        persistCommandEventAsync(snapshot.id, fromState, "sent", "worker_dispatch", snapshot.retryCount);
         const bool published = mqtt_.publishCommand(snapshot.roomId, snapshot.deviceId, snapshot.action);
-        db_.recordOperation(snapshot.roomId, snapshot.deviceId, snapshot.action, 0);
+        persistOperationAsync(snapshot.roomId, snapshot.deviceId, snapshot.action, 0);
         if (!published) {
             handleCommandFailure(commandId, "E_PUBLISH", "mqtt_publish_failed", true);
         }
@@ -1046,6 +1537,13 @@ private:
     {
         int backoffMs = 0;
         bool shouldRetry = false;
+        QString jobId;
+        QString timeoutFromState;
+        QString timeoutToState = "timeout";
+        int timeoutRetryCount = 0;
+        QString finalErrorCode;
+        QString finalErrorMessage;
+        bool markFailed = false;
         {
             QMutexLocker locker(&commandMutex_);
             if (!commandJobs_.contains(commandId))
@@ -1053,11 +1551,11 @@ private:
             auto &job = commandJobs_[commandId];
             if (job.state != "sent")
                 return;
-            const QString fromState = job.state;
+            timeoutFromState = job.state;
             job.state = "timeout";
             job.updatedAt = QDateTime::currentDateTimeUtc();
-            db_.updateCommandJob(job.id, "timeout", job.retryCount, "E_TIMEOUT", "ack_timeout");
-            db_.appendCommandEvent(job.id, fromState, "timeout", "ack_timeout", job.retryCount);
+            jobId = job.id;
+            timeoutRetryCount = job.retryCount;
 
             if (job.retryCount < job.maxRetry) {
                 job.retryCount += 1;
@@ -1067,9 +1565,19 @@ private:
                 job.state = "failed";
                 job.errorCode = "E_TIMEOUT";
                 job.errorMessage = "ack_timeout_final";
-                db_.updateCommandJob(job.id, "failed", job.retryCount, job.errorCode, job.errorMessage);
-                db_.appendCommandEvent(job.id, "timeout", "failed", "retry_exhausted", job.retryCount);
+                markFailed = true;
+                timeoutToState = "failed";
+                timeoutRetryCount = job.retryCount;
+                finalErrorCode = job.errorCode;
+                finalErrorMessage = job.errorMessage;
             }
+        }
+
+        db_.updateCommandJob(jobId, "timeout", timeoutRetryCount, "E_TIMEOUT", "ack_timeout");
+        persistCommandEventAsync(jobId, timeoutFromState, "timeout", "ack_timeout", timeoutRetryCount);
+        if (markFailed) {
+            db_.updateCommandJob(jobId, "failed", timeoutRetryCount, finalErrorCode, finalErrorMessage);
+            persistCommandEventAsync(jobId, "timeout", "failed", "retry_exhausted", timeoutRetryCount);
         }
 
         if (shouldRetry) {
@@ -1088,20 +1596,23 @@ private:
     {
         int backoffMs = 0;
         bool shouldRetry = false;
+        QString jobId;
+        QString fromState;
+        int retryCount = 0;
         {
             QMutexLocker locker(&commandMutex_);
             if (!commandJobs_.contains(commandId))
                 return;
             auto &job = commandJobs_[commandId];
-            const QString fromState = job.state;
+            fromState = job.state;
+            jobId = job.id;
             if (retryable && job.retryCount < job.maxRetry) {
                 job.retryCount += 1;
                 job.state = "queued";
                 job.errorCode = errorCode;
                 job.errorMessage = errorMessage;
                 job.updatedAt = QDateTime::currentDateTimeUtc();
-                db_.updateCommandJob(job.id, "queued", job.retryCount, errorCode, errorMessage);
-                db_.appendCommandEvent(job.id, fromState, "queued", "retry_after_publish_failed", job.retryCount);
+                retryCount = job.retryCount;
                 shouldRetry = true;
                 backoffMs = qMin(4000, 500 * (1 << job.retryCount));
             } else {
@@ -1109,9 +1620,15 @@ private:
                 job.errorCode = errorCode;
                 job.errorMessage = errorMessage;
                 job.updatedAt = QDateTime::currentDateTimeUtc();
-                db_.updateCommandJob(job.id, "failed", job.retryCount, errorCode, errorMessage);
-                db_.appendCommandEvent(job.id, fromState, "failed", "publish_failed", job.retryCount);
+                retryCount = job.retryCount;
             }
+        }
+        if (shouldRetry) {
+            persistCommandStateAsync(jobId, "queued", retryCount, errorCode, errorMessage);
+            persistCommandEventAsync(jobId, fromState, "queued", "retry_after_publish_failed", retryCount);
+        } else {
+            db_.updateCommandJob(jobId, "failed", retryCount, errorCode, errorMessage);
+            persistCommandEventAsync(jobId, fromState, "failed", "publish_failed", retryCount);
         }
         if (shouldRetry) {
             std::thread([this, commandId, backoffMs]() {
@@ -1124,7 +1641,7 @@ private:
     // 设备状态回执到达后，尝试把对应命令标记为已确认。
     void tryAckCommands(const QString &roomId, const QString &deviceId, const QString &status)
     {
-        QStringList toAck;
+        QList<QPair<QString, int>> toAck;
         {
             QMutexLocker locker(&commandMutex_);
             for (auto it = commandJobs_.cbegin(); it != commandJobs_.cend(); ++it) {
@@ -1133,25 +1650,33 @@ private:
                     job.roomId == roomId &&
                     job.deviceId == deviceId &&
                     job.targetStatus == status) {
-                    toAck.append(it.key());
+                    toAck.append(qMakePair(it.key(), job.retryCount));
                 }
             }
         }
 
-        for (const auto &id : toAck) {
-            QMutexLocker locker(&commandMutex_);
-            if (!commandJobs_.contains(id))
-                continue;
-            auto &job = commandJobs_[id];
-            if (job.state != "sent")
-                continue;
-            const QString fromState = job.state;
-            job.state = "acked";
-            job.errorCode.clear();
-            job.errorMessage.clear();
-            job.updatedAt = QDateTime::currentDateTimeUtc();
-            db_.updateCommandJob(job.id, "acked", job.retryCount);
-            db_.appendCommandEvent(job.id, fromState, "acked", "state_matched", job.retryCount);
+        for (const auto &entry : toAck) {
+            const auto &id = entry.first;
+            int retryCount = entry.second;
+            QString jobId;
+            QString fromState;
+            {
+                QMutexLocker locker(&commandMutex_);
+                if (!commandJobs_.contains(id))
+                    continue;
+                auto &job = commandJobs_[id];
+                if (job.state != "sent")
+                    continue;
+                fromState = job.state;
+                job.state = "acked";
+                job.errorCode.clear();
+                job.errorMessage.clear();
+                job.updatedAt = QDateTime::currentDateTimeUtc();
+                jobId = job.id;
+                retryCount = job.retryCount;
+            }
+            db_.updateCommandJob(jobId, "acked", retryCount);
+            persistCommandEventAsync(jobId, fromState, "acked", "state_matched", retryCount);
         }
     }
 
@@ -1159,27 +1684,30 @@ private slots:
     // 收到设备状态上报后，把状态写入数据库并尝试完成命令 ACK。
     void onState(const QString &roomId, const QString &deviceId, const QString &name, const QString &status)
     {
-        if (!db_.isClassroomRegistered(roomId))
+        if (!isRoomRegistered(roomId))
             return;
         const QString normalizedStatus = normalizeDeviceStatus(status);
         DeviceState s;
         s.name = name;
         s.status = normalizedStatus;
         s.updated = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
-        {
-            QMutexLocker locker(&dataMutex_);
-            devices_[roomId + "::" + deviceId] = s;
-        }
-        db_.upsertDevice(roomId, deviceId, name, normalizedStatus);
+        setRuntimeDeviceState(roomId, deviceId, s);
+        PendingStateUpdate pending;
+        pending.roomId = roomId;
+        pending.deviceId = deviceId;
+        pending.state = s;
+        pending.dueAtMs = QDateTime::currentMSecsSinceEpoch() + 500;
+        pendingStateUpdates_.insert(roomId + "::" + deviceId, pending);
         tryAckCommands(roomId, deviceId, normalizedStatus);
     }
 
     // 收到告警或报修信息后，直接写入告警表。
     void onAlert(const QString &roomId, const QString &deviceId, const QString &message, const QString &level)
     {
-        if (!db_.isClassroomRegistered(roomId))
+        if (!isRoomRegistered(roomId))
             return;
         db_.insertAlert(roomId, deviceId, message, level);
+        broadcastAlertsChanged(roomId, deviceId);
     }
 };
 

@@ -31,6 +31,8 @@ ApplicationWindow {
     property bool registered: api.registered
     property string statusText: "请选择教室号完成接入"
     property string pendingBulkAction: ""
+    property bool bulkControlLocked: false
+    property double bulkControlUnlockAtMs: 0
     property int syncedDeviceCount: 0
     property int syncedOnlineCount: 0
     property int syncedActiveCount: 0
@@ -149,6 +151,64 @@ ApplicationWindow {
         return rid
     }
 
+    function randomFallbackPollInterval() {
+        return 25000 + Math.floor(Math.random() * 10001)
+    }
+
+    function bulkLockRemainingSeconds() {
+        if (!bulkControlLockTimer.running)
+            return 0
+        return Math.max(1, Math.ceil((window.bulkControlUnlockAtMs - Date.now()) / 1000))
+    }
+
+    function beginBulkControlLock(action) {
+        window.bulkControlLocked = true
+        window.bulkControlUnlockAtMs = Date.now() + 5000
+        bulkControlLockTimer.restart()
+        window.statusText = action === "power_on"
+            ? "一键上课已触发，5 秒内禁止再次执行批量控制"
+            : "一键下课已触发，5 秒内禁止再次执行批量控制"
+    }
+
+    function ensureBulkControlUnlocked(actionLabel) {
+        if (!window.bulkControlLocked)
+            return true
+        window.statusText = actionLabel + "暂不可用，请在 "
+            + window.bulkLockRemainingSeconds() + " 秒后重试"
+        return false
+    }
+
+    function requestSingleDeviceCommand(deviceId, action) {
+        if (!window.registered) {
+            window.statusText = "教室未注册，无法执行设备控制"
+            return
+        }
+        if (window.locked) {
+            window.statusText = "当前已被管理端锁定，无法执行设备控制"
+            return
+        }
+        if (window.bulkControlLocked) {
+            window.statusText = "批量控制互锁中，5 秒内不响应单设备开关机"
+            return
+        }
+        api.sendCommand(window.roomId, deviceId, action)
+    }
+
+    function scheduleScopedDeviceRefresh() {
+        if (!window.registered || !window.roomId)
+            return
+        classroomEventRefreshTimer.stop()
+        classroomEventRefreshTimer.start()
+    }
+
+    function rescheduleFallbackPolling() {
+        classroomFallbackDeviceTimer.stop()
+        if (!window.registered || !window.roomId)
+            return
+        classroomFallbackDeviceTimer.interval = window.randomFallbackPollInterval()
+        classroomFallbackDeviceTimer.start()
+    }
+
     function executeBulkAction(action) {
         if (!window.registered) {
             window.statusText = "教室未注册，无法执行"
@@ -218,12 +278,15 @@ ApplicationWindow {
             window.statusText = "当前教室号为空，无法执行"
             return
         }
+        if (!window.ensureBulkControlUnlocked(action === "power_on" ? "一键上课" : "一键下课"))
+            return
 
+        window.beginBulkControlLock(action)
         window.pendingBulkAction = action
         window.manualRefresh = false
         window.statusText = action === "power_on"
-            ? "正在同步设备状态并执行一键上课..."
-            : "正在同步设备状态并执行一键下课..."
+            ? "正在同步设备状态并执行一键上课，批量控制已锁定 5 秒..."
+            : "正在同步设备状态并执行一键下课，批量控制已锁定 5 秒..."
         api.fetchDevicesByRoom(window.roomId)
     }
 
@@ -235,10 +298,37 @@ ApplicationWindow {
     }
 
     Timer {
-        interval: 2500
-        running: window.registered && window.roomId.length > 0
-        repeat: true
-        onTriggered: api.fetchDevicesByRoom(window.roomId)
+        id: classroomEventRefreshTimer
+        interval: 200
+        repeat: false
+        onTriggered: {
+            if (window.registered && window.roomId)
+                api.fetchDevicesByRoom(window.roomId)
+        }
+    }
+
+    Timer {
+        id: classroomFallbackDeviceTimer
+        interval: 30000
+        repeat: false
+        onTriggered: {
+            if (window.registered && window.roomId)
+                api.fetchDevicesByRoom(window.roomId)
+            window.rescheduleFallbackPolling()
+        }
+    }
+
+    Timer {
+        id: bulkControlLockTimer
+        interval: 5000
+        repeat: false
+        onTriggered: {
+            window.bulkControlLocked = false
+            window.bulkControlUnlockAtMs = 0
+            if (window.statusText.indexOf("批量控制已锁定 5 秒") >= 0
+                    || window.statusText.indexOf("批量控制互锁中") >= 0)
+                window.statusText = "批量控制锁已解除，可继续操作"
+        }
     }
 
     Dialog {
@@ -385,15 +475,15 @@ ApplicationWindow {
                         text: "关机"
                         variant: "secondary"
                         minWidth: 80
-                        enabled: !window.locked && window.registered
-                        onClicked: api.sendCommand(window.roomId, deviceId, "power_off")
+                        enabled: !window.locked && !window.bulkControlLocked && window.registered
+                        onClicked: window.requestSingleDeviceCommand(deviceId, "power_off")
                     }
 
                     Common.ActionButton {
                         text: "开机"
                         minWidth: 80
-                        enabled: !window.locked && window.registered
-                        onClicked: api.sendCommand(window.roomId, deviceId, "power_on")
+                        enabled: !window.locked && !window.bulkControlLocked && window.registered
+                        onClicked: window.requestSingleDeviceCommand(deviceId, "power_on")
                     }
                 }
             }
@@ -405,6 +495,7 @@ ApplicationWindow {
         anchors.fill: parent
         locked: window.locked
         busy: api.busy
+        bulkControlLocked: window.bulkControlLocked
         registered: window.registered
         backendReady: window.backendReady
         roomId: window.roomId
@@ -501,6 +592,8 @@ ApplicationWindow {
                 return
             }
 
+            window.rescheduleFallbackPolling()
+
             let scoped = []
             for (let i = 0; i < devices.length; ++i) {
                 const d = devices[i]
@@ -537,11 +630,16 @@ ApplicationWindow {
                 window.roomId = window.inputRoomId.trim()
                 window.statusText = "注册成功，正在同步设备..."
                 window.manualRefresh = false
+                api.startClassroomEventStream(window.roomId)
+                window.rescheduleFallbackPolling()
                 api.fetchDevicesByRoom(window.roomId)
             } else {
                 window.statusText = "教室未注册，请先完成接入"
                 window.backendReady = false
                 window.roomId = ""
+                api.stopEventStream()
+                classroomFallbackDeviceTimer.stop()
+                classroomEventRefreshTimer.stop()
                 deviceModel.refresh()
                 window.resetDeviceStats()
             }
@@ -560,6 +658,27 @@ ApplicationWindow {
             window.locked = lockedValue
             if (lockedValue)
                 window.statusText = "已被管理端锁定"
+        }
+
+        function onServerDevicesChanged(roomId) {
+            if (roomId === window.roomId)
+                window.scheduleScopedDeviceRefresh()
+        }
+
+        function onServerRegistrationChanged(roomId, registered) {
+            if (roomId !== window.roomId)
+                return
+            if (!registered) {
+                window.registered = false
+                window.roomId = ""
+                window.backendReady = false
+                api.stopEventStream()
+                classroomFallbackDeviceTimer.stop()
+                classroomEventRefreshTimer.stop()
+                deviceModel.refresh()
+                window.resetDeviceStats()
+                window.statusText = "当前教室已取消接入"
+            }
         }
 
         function onOperationFinished(action, message) {

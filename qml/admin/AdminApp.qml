@@ -192,16 +192,51 @@ ApplicationWindow {
         }
     }
 
+    function scheduleDeviceRefresh() {
+        if (!window.loggedIn)
+            return
+        adminDevicesEventTimer.stop()
+        adminDevicesEventTimer.start()
+    }
+
+    function scheduleAlertRefresh() {
+        if (!window.loggedIn)
+            return
+        adminAlertsEventTimer.stop()
+        adminAlertsEventTimer.start()
+    }
+
     Timer {
-        interval: 2500
+        id: adminDevicesEventTimer
+        interval: 200
+        repeat: false
+        onTriggered: {
+            if (window.loggedIn)
+                api.fetchDevices()
+        }
+    }
+
+    Timer {
+        id: adminAlertsEventTimer
+        interval: 200
+        repeat: false
+        onTriggered: {
+            if (window.loggedIn)
+                api.fetchAlerts()
+        }
+    }
+
+    Timer {
+        id: adminFallbackSyncTimer
+        interval: 60000
         running: window.loggedIn
         repeat: true
         onTriggered: {
             api.fetchDevices()
             api.fetchAlerts()
+            api.fetchLock()
         }
     }
-
     Component {
         id: adminDeviceDelegate
 
@@ -655,6 +690,7 @@ ApplicationWindow {
         function onLoginSucceeded() {
             window.loggedIn = true
             window.statusText = "登录成功，正在同步设备状态"
+            api.startAdminEventStream()
             api.fetchDevices()
             api.fetchLock()
             api.fetchAlerts()
@@ -664,12 +700,14 @@ ApplicationWindow {
 
         function onLoginFailed(message) {
             window.loggedIn = false
+            api.stopEventStream()
             adminUserModel.clear()
             window.statusText = message
         }
 
         function onUnauthorized(message) {
             window.loggedIn = false
+            api.stopEventStream()
             window.devicesCache = []
             window.selectedDeviceIndex = -1
             deviceModel.setDevices([])
@@ -706,6 +744,18 @@ ApplicationWindow {
 
         function onAdminUsersReceived(admins) {
             window.resetAdminUsers(admins ? admins : [])
+        }
+
+        function onServerDevicesChanged(roomId) {
+            window.scheduleDeviceRefresh()
+        }
+
+        function onServerAlertsChanged(roomId, deviceId) {
+            window.scheduleAlertRefresh()
+        }
+
+        function onServerRegistrationChanged(roomId, registered) {
+            window.scheduleDeviceRefresh()
         }
 
         function onOperationFinished(action, message) {
