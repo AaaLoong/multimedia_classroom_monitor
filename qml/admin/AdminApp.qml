@@ -27,14 +27,53 @@ ApplicationWindow {
     property bool canChangePassword: api.canChangePassword
     property bool manualRefresh: false
     property int navIndex: 0
-    property int selectedDeviceIndex: -1
+    property int selectedRoomDeviceIndex: -1
     property string statusText: "系统待命"
     property string adminUsername: api.adminUsername
     property var devicesCache: []
+    property string devicePageMode: "rooms"
+    property string selectedRoomId: ""
+    property string selectedRoomDeviceId: ""
+    property real deviceRoomListPosition: 0
+
+    function requestLogin() {
+        api.login(form.userField.text, form.passField.text)
+    }
+
+    function resetAdminViewState(message, clearCredentials) {
+        window.loggedIn = false
+        window.manualRefresh = false
+        window.navIndex = 0
+        window.selectedRoomDeviceIndex = -1
+        window.selectedRoomDeviceId = ""
+        window.devicePageMode = "rooms"
+        window.selectedRoomId = ""
+        window.deviceRoomListPosition = 0
+        window.devicesCache = []
+        roomDeviceModel.clear()
+        alertModel.clear()
+        alertPreviewModel.clear()
+        roomSummaryModel.clear()
+        adminUserModel.clear()
+        manageAdminsDialog.close()
+        changePasswordDialog.close()
+        newAdminUserField.text = ""
+        newAdminPasswordField.text = ""
+        oldPasswordField.text = ""
+        newPasswordField.text = ""
+        confirmPasswordField.text = ""
+        if (clearCredentials) {
+            form.userField.text = ""
+            form.passField.text = ""
+        }
+        if (message && String(message).trim() !== "")
+            window.statusText = message
+    }
 
     ListModel { id: alertModel }
     ListModel { id: alertPreviewModel }
     ListModel { id: roomSummaryModel }
+    ListModel { id: roomDeviceModel }
     ListModel { id: adminUserModel }
 
     function formatDateCN(d) {
@@ -152,6 +191,7 @@ ApplicationWindow {
         for (let i = 0; i < alerts.length; ++i) {
             const a = alerts[i]
             const item = {
+                alertId: a.id ? a.id : 0,
                 level: a.level ? a.level : "warning",
                 roomId: a.room_id ? a.room_id : "",
                 deviceId: a.device_id ? a.device_id : "",
@@ -164,10 +204,72 @@ ApplicationWindow {
         }
     }
 
+    function rebuildSelectedRoomDevices() {
+        roomDeviceModel.clear()
+        if (!window.selectedRoomId)
+            return
+
+        for (let i = 0; i < window.devicesCache.length; ++i) {
+            const d = window.devicesCache[i]
+            const rid = d.room_id ? d.room_id : d.roomId
+            if (rid !== window.selectedRoomId)
+                continue
+
+            roomDeviceModel.append({
+                roomId: rid,
+                deviceId: d.device_id ? d.device_id : (d.deviceId ? d.deviceId : ""),
+                name: d.name ? d.name : "",
+                status: d.status ? d.status : "",
+                updated: d.updated ? d.updated : ""
+            })
+        }
+
+        let nextIndex = -1
+        if (window.selectedRoomDeviceId !== "") {
+            for (let row = 0; row < roomDeviceModel.count; ++row) {
+                if (roomDeviceModel.get(row).deviceId === window.selectedRoomDeviceId) {
+                    nextIndex = row
+                    break
+                }
+            }
+        }
+
+        if (nextIndex < 0 && roomDeviceModel.count > 0)
+            nextIndex = 0
+
+        window.selectedRoomDeviceIndex = nextIndex
+        if (nextIndex >= 0)
+            window.selectedRoomDeviceId = roomDeviceModel.get(nextIndex).deviceId
+        else
+            window.selectedRoomDeviceId = ""
+    }
+
+    function enterRoomDevicesPage(roomId) {
+        if (!roomId)
+            return
+        if (form && form.roomListView)
+            window.deviceRoomListPosition = form.roomListView.contentY
+        window.selectedRoomId = roomId
+        window.selectedRoomDeviceIndex = -1
+        window.selectedRoomDeviceId = ""
+        window.devicePageMode = "roomDevices"
+        window.rebuildSelectedRoomDevices()
+    }
+
+    function leaveRoomDevicesPage() {
+        window.devicePageMode = "rooms"
+        window.selectedRoomDeviceIndex = -1
+        window.selectedRoomDeviceId = ""
+        Qt.callLater(function() {
+            if (form && form.roomListView)
+                form.roomListView.contentY = window.deviceRoomListPosition
+        })
+    }
+
     function selectedDevice() {
-        if (selectedDeviceIndex < 0 || selectedDeviceIndex >= deviceModel.rowCount())
+        if (selectedRoomDeviceIndex < 0 || selectedRoomDeviceIndex >= roomDeviceModel.count)
             return null
-        return deviceModel.get(selectedDeviceIndex)
+        return roomDeviceModel.get(selectedRoomDeviceIndex)
     }
 
     function sendSelectedCommand(action) {
@@ -237,6 +339,21 @@ ApplicationWindow {
             api.fetchLock()
         }
     }
+
+    Shortcut {
+        enabled: !window.loggedIn
+        context: Qt.WindowShortcut
+        sequence: "Return"
+        onActivated: window.requestLogin()
+    }
+
+    Shortcut {
+        enabled: !window.loggedIn
+        context: Qt.WindowShortcut
+        sequence: "Enter"
+        onActivated: window.requestLogin()
+    }
+
     Component {
         id: adminDeviceDelegate
 
@@ -253,11 +370,11 @@ ApplicationWindow {
             width: ListView.view.width
             height: 84
             radius: Common.Theme.radiusM
-            color: window.selectedDeviceIndex === index
+            color: window.selectedRoomDeviceIndex === index
                 ? (pressed ? "#e4edff" : (hovered ? "#edf4ff" : "#f3f7ff"))
                 : (pressed ? "#eef3fa" : (hovered ? "#f7faff" : "#fcfdff"))
             border.width: 1
-            border.color: window.selectedDeviceIndex === index
+            border.color: window.selectedRoomDeviceIndex === index
                 ? "#bdd0f4"
                 : (hovered ? "#d4e0f1" : Common.Theme.borderColor)
             scale: pressed ? 0.992 : 1.0
@@ -336,7 +453,10 @@ ApplicationWindow {
 
             TapHandler {
                 id: deviceTap
-                onTapped: window.selectedDeviceIndex = index
+                onTapped: {
+                    window.selectedRoomDeviceIndex = index
+                    window.selectedRoomDeviceId = deviceId
+                }
             }
         }
     }
@@ -348,15 +468,6 @@ ApplicationWindow {
         preferredDialogHeight: 720
         minimumDialogWidth: 620
         minimumDialogHeight: 440
-
-        Text {
-            Layout.fillWidth: true
-            text: "仅超级管理员可新增或删除普通管理员。初始超级管理员账号固定保留，不支持改密。"
-            wrapMode: Text.WordWrap
-            color: Common.Theme.textSecondary
-            font.family: Common.Theme.fontFamily
-            font.pixelSize: 13
-        }
 
         Common.SurfaceCard {
             id: createAdminCard
@@ -374,7 +485,6 @@ ApplicationWindow {
                 Common.SectionHeader {
                     width: parent.width
                     title: "新增普通管理员"
-                    subtitle: "新增账号默认是普通管理员，不会授予超管权限。"
                     maxTitleLines: 1
                     maxSubtitleLines: 2
                 }
@@ -382,7 +492,7 @@ ApplicationWindow {
                 TextField {
                     id: newAdminUserField
                     Layout.fillWidth: true
-                    placeholderText: "账号，3 到 32 位，字母开头"
+                    placeholderText: "账号，3 到 32 位，以字母开头"
                 }
 
                 TextField {
@@ -418,7 +528,6 @@ ApplicationWindow {
         Common.SectionHeader {
             Layout.fillWidth: true
             title: "管理员列表"
-            subtitle: "超级管理员固定保留，普通管理员支持删除。"
             maxTitleLines: 1
             maxSubtitleLines: 2
         }
@@ -477,7 +586,7 @@ ApplicationWindow {
                         Text {
                             Layout.fillWidth: true
                             text: isSuper
-                                  ? "初始超级管理员固定保留，不支持删除和修改密码。"
+                                  ? "超级管理员固定保留，不支持删除。"
                                   : ("创建时间 " + createdAt + " | 最近改密 " + (passwordUpdatedAt !== "" ? passwordUpdatedAt : "未记录"))
                             color: Common.Theme.textSecondary
                             font.family: Common.Theme.fontFamily
@@ -491,7 +600,7 @@ ApplicationWindow {
             Text {
                 width: parent.width
                 visible: adminUserModel.count === 0
-                text: "当前没有可展示的管理员。"
+                text: "当前未注册管理员。"
                 color: Common.Theme.textSecondary
                 font.family: Common.Theme.fontFamily
                 font.pixelSize: 13
@@ -587,6 +696,96 @@ ApplicationWindow {
         }
     }
 
+    Dialog {
+        id: resolveAllAlertsDialog
+        modal: true
+        focus: true
+        padding: 0
+        standardButtons: Dialog.NoButton
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        width: 360
+        x: Math.round((window.width - width) / 2)
+        y: Math.round((window.height - height) / 2)
+
+        background: Rectangle {
+            radius: Common.Theme.radiusL
+            color: Common.Theme.cardBg
+            border.width: 1
+            border.color: Common.Theme.borderColor
+        }
+
+        contentItem: ColumnLayout {
+            anchors.fill: parent
+            spacing: 0
+
+            Rectangle {
+                Layout.fillWidth: true
+                implicitHeight: promptTitle.implicitHeight + Common.Theme.spaceL * 2
+                color: "#f7faff"
+                radius: Common.Theme.radiusL
+
+                Rectangle {
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.bottom: parent.bottom
+                    height: Common.Theme.radiusL
+                    color: parent.color
+                }
+
+                Text {
+                    id: promptTitle
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.margins: Common.Theme.spaceL
+                    text: "处理异常"
+                    color: Common.Theme.textPrimary
+                    font.family: Common.Theme.fontFamily
+                    font.pixelSize: 22
+                    font.bold: true
+                    wrapMode: Text.WordWrap
+                }
+            }
+
+            ColumnLayout {
+                Layout.fillWidth: true
+                Layout.margins: Common.Theme.spaceL
+                spacing: Common.Theme.spaceL
+
+                Text {
+                    Layout.fillWidth: true
+                    text: "确定处理吗？"
+                    color: Common.Theme.textPrimary
+                    font.family: Common.Theme.fontFamily
+                    font.pixelSize: 16
+                    wrapMode: Text.WordWrap
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+
+                    Item { Layout.fillWidth: true }
+
+                    Common.ActionButton {
+                        text: "取消"
+                        variant: "secondary"
+                        minWidth: 88
+                        onClicked: resolveAllAlertsDialog.close()
+                    }
+
+                    Common.ActionButton {
+                        text: "确定"
+                        minWidth: 88
+                        onClicked: {
+                            resolveAllAlertsDialog.close()
+                            api.resolveAllAlerts()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     AdminAppForm {
         id: form
         anchors.fill: parent
@@ -596,23 +795,29 @@ ApplicationWindow {
         isSuperAdmin: window.isSuperAdmin
         canChangePassword: window.canChangePassword
         navIndex: window.navIndex
-        selectedDeviceIndex: window.selectedDeviceIndex
+        selectedDeviceIndex: window.selectedRoomDeviceIndex
         hasSelectedDevice: window.selectedDevice() !== null
-        pageTitle: window.navIndex === 0 ? "系统总览" : (window.navIndex === 1 ? "设备控制" : "告警中心")
+        pageTitle: window.navIndex === 0
+                   ? "系统总览"
+                   : (window.navIndex === 1
+                      ? (window.devicePageMode === "roomDevices" && window.selectedRoomId !== ""
+                         ? ("设备控制 / " + window.selectedRoomId)
+                         : "设备控制")
+                      : "异常汇总")
         pageDateText: "多媒体教室管理系统 | " + window.formatDateCN(new Date())
         statusText: window.statusText
         adminUsername: window.adminUsername
-        overviewHeadline: "统一感知教室接入、设备活跃度与告警分布"
-        overviewFootnote: "当前共接入 " + window.uniqueRoomCount() + " 间教室，在线设备 " + window.onlineDeviceCount() + " 台。"
         roomCount: window.uniqueRoomCount()
         activeRoomCount: window.activeRoomCount()
         onlineDeviceCount: window.onlineDeviceCount()
         totalDeviceCount: window.devicesCache.length
         alertCount: alertModel.count
+        devicePageMode: window.devicePageMode
+        selectedRoomId: window.selectedRoomId
         roomSummaryListModel: roomSummaryModel
         alertPreviewModel: alertPreviewModel
         alertListModel: alertModel
-        deviceListModel: deviceModel
+        deviceListModel: roomDeviceModel
         deviceListDelegate: adminDeviceDelegate
     }
 
@@ -662,18 +867,18 @@ ApplicationWindow {
     }
 
     Connections {
-        target: form.powerOnButton
-        function onClicked() { window.sendSelectedCommand("power_on") }
+        target: form
+        function onProcessAlertRequested(alertId) { api.resolveAlert(alertId) }
+        function onProcessAllAlertsRequested() { resolveAllAlertsDialog.open() }
     }
 
     Connections {
-        target: form.powerOffButton
-        function onClicked() { window.sendSelectedCommand("power_off") }
-    }
-
-    Connections {
-        target: form.refreshDevicesButton
-        function onClicked() {
+        target: form
+        function onRoomSelected(roomId) { window.enterRoomDevicesPage(roomId) }
+        function onBackToRoomsRequested() { window.leaveRoomDevicesPage() }
+        function onPowerOnRequested() { window.sendSelectedCommand("power_on") }
+        function onPowerOffRequested() { window.sendSelectedCommand("power_off") }
+        function onRefreshDevicePageRequested() {
             window.manualRefresh = true
             api.fetchDevices()
         }
@@ -681,7 +886,12 @@ ApplicationWindow {
 
     Connections {
         target: form.loginButton
-        function onClicked() { api.login(form.userField.text, form.passField.text) }
+        function onClicked() { window.requestLogin() }
+    }
+
+    Connections {
+        target: form.logoutButton
+        function onClicked() { api.logout() }
     }
 
     Connections {
@@ -699,34 +909,22 @@ ApplicationWindow {
         }
 
         function onLoginFailed(message) {
-            window.loggedIn = false
-            api.stopEventStream()
-            adminUserModel.clear()
+            if (window.loggedIn) {
+                window.resetAdminViewState(message, true)
+                return
+            }
+            form.passField.text = ""
             window.statusText = message
         }
 
         function onUnauthorized(message) {
-            window.loggedIn = false
             api.stopEventStream()
-            window.devicesCache = []
-            window.selectedDeviceIndex = -1
-            deviceModel.setDevices([])
-            alertModel.clear()
-            alertPreviewModel.clear()
-            roomSummaryModel.clear()
-            adminUserModel.clear()
-            window.statusText = message
+            window.resetAdminViewState(message, true)
         }
 
         function onDevicesReceived(devices) {
             window.devicesCache = devices ? devices : []
-            deviceModel.setDevices(window.devicesCache)
-            if (deviceModel.rowCount() > 0) {
-                if (window.selectedDeviceIndex < 0 || window.selectedDeviceIndex >= deviceModel.rowCount())
-                    window.selectedDeviceIndex = 0
-            } else {
-                window.selectedDeviceIndex = -1
-            }
+            window.rebuildSelectedRoomDevices()
             if (window.manualRefresh)
                 window.statusText = "设备与教室状态已更新"
             window.manualRefresh = false

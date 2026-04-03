@@ -15,6 +15,7 @@
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QQuickStyle>
+#include <QRandomGenerator>
 #include <QSet>
 #include <QTimer>
 #include <QUrl>
@@ -23,7 +24,7 @@
 
 /*
  * 这个文件是设备仿真端的主程序。
- * 它负责模拟教室设备接收命令、上报状态、发送心跳、触发告警，并支持多教室同步。
+ * 它负责模拟教室设备接收命令、上报状态、触发告警，并支持多教室同步。
  * 对初学者来说，可以把它理解成“虚拟设备控制台”。
  */
 
@@ -59,15 +60,131 @@ static QString buildSimulatorClientId()
         .arg(QDateTime::currentMSecsSinceEpoch());
 }
 
+static bool commandTraceEnabled()
+{
+    static const bool enabled = qEnvironmentVariableIsSet("SIM_COMMAND_TRACE")
+        && qEnvironmentVariable("SIM_COMMAND_TRACE").trimmed().compare("false", Qt::CaseInsensitive) != 0
+        && qEnvironmentVariable("SIM_COMMAND_TRACE").trimmed() != "0";
+    return enabled;
+}
+
+static QString traceValue(QString value)
+{
+    value = value.trimmed();
+    if (value.isEmpty())
+        return QStringLiteral("-");
+    value.replace('\\', '/');
+    value.replace('\n', '_');
+    value.replace('\r', '_');
+    value.replace('\t', '_');
+    value.replace(' ', '_');
+    return value;
+}
+
+static bool readSimRandomDelayEnabled()
+{
+    if (!qEnvironmentVariableIsSet("SIM_DEVICE_RANDOM_DELAY"))
+        return false;
+    const QString raw = qEnvironmentVariable("SIM_DEVICE_RANDOM_DELAY").trimmed();
+    return raw.compare("true", Qt::CaseInsensitive) == 0 || raw == "1";
+}
+
+static int readSimDelayMinMs()
+{
+    bool ok = false;
+    const int value = qEnvironmentVariableIntValue("SIM_DEVICE_DELAY_MIN_MS", &ok);
+    return qMax(0, ok ? value : 500);
+}
+
+static int readSimDelayMaxMs()
+{
+    bool ok = false;
+    const int value = qEnvironmentVariableIntValue("SIM_DEVICE_DELAY_MAX_MS", &ok);
+    return qMax(readSimDelayMinMs(), ok ? value : 1800);
+}
+
+static double readSimFaultPercent()
+{
+    bool ok = false;
+    const double parsed = qEnvironmentVariable("SIM_DEVICE_FAULT_PERCENT").toDouble(&ok);
+    return ok ? qMax(0.0, parsed) : 1.8;
+}
+
+static int readSimConnectRetryBaseMs()
+{
+    bool ok = false;
+    const int value = qEnvironmentVariableIntValue("SIM_DEVICE_CONNECT_RETRY_BASE_MS", &ok);
+    return qMax(100, ok ? value : 250);
+}
+
+static int readSimConnectRetryMaxMs()
+{
+    bool ok = false;
+    const int value = qEnvironmentVariableIntValue("SIM_DEVICE_CONNECT_RETRY_MAX_MS", &ok);
+    return qMax(readSimConnectRetryBaseMs(), ok ? value : 5000);
+}
+
+static void logDeviceTrace(const QString &phase,
+                           const QString &result,
+                           const QString &roomId,
+                           const QString &deviceId,
+                           const QString &action,
+                           const QString &commandId,
+                           qulonglong epoch,
+                           qulonglong version,
+                           const QString &status,
+                           const QString &detail)
+{
+    if (!commandTraceEnabled())
+        return;
+
+    const QString line = QStringLiteral(
+                             "cmd_trace ts=%1 source=device phase=%2 result=%3 room=%4 device=%5 action=%6 command_id=%7 epoch=%8 version=%9 status=%10 detail=%11")
+                             .arg(traceValue(ClassInit::currentShanghaiIsoString()),
+                                  traceValue(phase),
+                                  traceValue(result),
+                                  traceValue(roomId),
+                                  traceValue(deviceId),
+                                  traceValue(action),
+                                  traceValue(commandId),
+                                  traceValue(epoch > 0 ? QString::number(epoch) : QString()),
+                                  traceValue(version > 0 ? QString::number(version) : QString()),
+                                  traceValue(status),
+                                  traceValue(detail));
+    qInfo().noquote() << line;
+}
+
 // 单个教室在仿真端的运行状态。
 struct SimRoomState {
     QString roomId;
     std::vector<Device> devices;
     QSet<QString> forcedOfflineDevices;
-    bool heartbeatPaused = false;
+    QHash<QString, qulonglong> acceptedCommandEpochs;
+    QHash<QString, qulonglong> acceptedCommandVersions;
+    QHash<QString, QString> acceptedCommandIds;
     bool randomDelayEnabled = false;
     int lastDelayMs = 0;
 };
+
+struct SimCommandOrder {
+    qulonglong epoch = 0;
+    qulonglong version = 0;
+    QString commandId;
+
+    bool isValid() const { return epoch > 0 && version > 0; }
+};
+
+static bool simOrderLess(const SimCommandOrder &lhs, const SimCommandOrder &rhs)
+{
+    if (lhs.epoch != rhs.epoch)
+        return lhs.epoch < rhs.epoch;
+    return lhs.version < rhs.version;
+}
+
+static bool simOrderEqual(const SimCommandOrder &lhs, const SimCommandOrder &rhs)
+{
+    return lhs.epoch == rhs.epoch && lhs.version == rhs.version && lhs.commandId == rhs.commandId;
+}
 
 /*
  * DeviceSimClient 是仿真端的核心对象。
@@ -81,7 +198,6 @@ class DeviceSimClient : public QObject
     Q_PROPERTY(QString currentRoomId READ currentRoomId WRITE setCurrentRoomId NOTIFY currentRoomIdChanged)
     Q_PROPERTY(QStringList deviceIds READ deviceIds NOTIFY deviceIdsChanged)
     Q_PROPERTY(QString selectedDeviceId READ selectedDeviceId WRITE setSelectedDeviceId NOTIFY selectedDeviceIdChanged)
-    Q_PROPERTY(bool heartbeatPaused READ heartbeatPaused NOTIFY heartbeatPausedChanged)
     Q_PROPERTY(bool randomDelayEnabled READ randomDelayEnabled NOTIFY randomDelayEnabledChanged)
     Q_PROPERTY(int lastDelayMs READ lastDelayMs NOTIFY lastDelayChanged)
     Q_PROPERTY(bool roomOperationBusy READ roomOperationBusy NOTIFY roomOperationBusyChanged)
@@ -100,34 +216,26 @@ public:
     {
         connOpts_.set_clean_session(true);
         connOpts_.set_automatic_reconnect(true);
+        mqttReconnectTimer_.setSingleShot(true);
+        connect(&mqttReconnectTimer_, &QTimer::timeout, this, [this]() {
+            attemptMqttConnect();
+        });
 
         client_.set_message_callback([this](mqtt::const_message_ptr msg) {
             handleMessage(QString::fromStdString(msg->get_topic()),
                           QByteArray::fromStdString(msg->to_string()));
         });
 
-        try {
-            client_.connect(connOpts_)->wait();
-            client_.subscribe("classroom/+/cmd/+", 1)->wait();
-            mqttReady_ = true;
-            setStatusText("MQTT 已连接，等待教室接入");
-        } catch (const mqtt::exception &e) {
-            setStatusText(QString("MQTT 连接失败: %1").arg(e.what()));
-        }
-
-        connect(&heartbeatTimer_, &QTimer::timeout, this, &DeviceSimClient::sendHeartbeat);
-        heartbeatTimer_.start(30000);
+        attemptMqttConnect();
 
         // 如果配置了后端地址，就周期性同步教室列表；否则只启动单教室本地模式。
         if (!backendBaseUrl_.isEmpty()) {
             connect(&roomRefreshTimer_, &QTimer::timeout, this, &DeviceSimClient::refreshRooms);
             roomRefreshTimer_.start(3000);
             QTimer::singleShot(0, this, &DeviceSimClient::refreshRooms);
-        } else {
-            ensureRoom(preferredRoomId_.isEmpty() ? QStringLiteral("A101") : preferredRoomId_);
+        } else if (!preferredRoomId_.isEmpty()) {
+            ensureRoom(preferredRoomId_);
         }
-
-        sendHeartbeat();
     }
 
     // 析构时断开 MQTT，保证进程退出时更干净。
@@ -162,12 +270,6 @@ public:
 
     QString selectedDeviceId() const { return selectedDeviceId_; }
 
-    bool heartbeatPaused() const
-    {
-        const auto *room = findRoom(currentRoomId_);
-        return room ? room->heartbeatPaused : false;
-    }
-
     bool randomDelayEnabled() const
     {
         const auto *room = findRoom(currentRoomId_);
@@ -198,7 +300,6 @@ public:
         emit deviceIdsChanged();
         if (selectedChanged)
             emit selectedDeviceIdChanged();
-        emit heartbeatPausedChanged();
         emit randomDelayEnabledChanged();
         emit lastDelayChanged();
     }
@@ -230,8 +331,8 @@ public:
 
             if (!error.isEmpty()) {
                 setStatusText(QString("教室列表刷新失败: %1").arg(error));
-                if (rooms_.isEmpty())
-                    ensureRoom(preferredRoomId_.isEmpty() ? QStringLiteral("A101") : preferredRoomId_);
+                if (rooms_.isEmpty() && !preferredRoomId_.isEmpty())
+                    ensureRoom(preferredRoomId_);
                 return;
             }
 
@@ -315,22 +416,6 @@ public:
         });
     }
 
-    // 模拟心跳中断/恢复。
-    Q_INVOKABLE void toggleHeartbeat()
-    {
-        auto *room = ensureRoom(currentRoomId_);
-        if (!room) {
-            setStatusText("当前没有可控制的教室");
-            return;
-        }
-
-        room->heartbeatPaused = !room->heartbeatPaused;
-        emit heartbeatPausedChanged();
-        setStatusText(room->heartbeatPaused
-            ? QString("教室 %1 链路异常，心跳已停止").arg(room->roomId)
-            : QString("教室 %1 链路恢复，心跳已恢复").arg(room->roomId));
-    }
-
     // 开关随机延迟模式，用来模拟网络抖动和设备慢响应。
     Q_INVOKABLE void toggleRandomDelay()
     {
@@ -379,7 +464,6 @@ signals:
     void currentRoomIdChanged();
     void deviceIdsChanged();
     void selectedDeviceIdChanged();
-    void heartbeatPausedChanged();
     void randomDelayEnabledChanged();
     void lastDelayChanged();
     void roomOperationBusyChanged();
@@ -392,16 +476,37 @@ private:
     QNetworkAccessManager http_;
     mqtt::async_client client_;
     mqtt::connect_options connOpts_;
-    QTimer heartbeatTimer_;
     QTimer roomRefreshTimer_;
+    QTimer mqttReconnectTimer_;
     Randomizer rand_;
     QMap<QString, SimRoomState> rooms_;
     QString currentRoomId_;
     QString selectedDeviceId_;
     bool mqttReady_ = false;
+    bool mqttSubscribed_ = false;
     bool refreshInFlight_ = false;
     bool roomOperationBusy_ = false;
     QString statusText_;
+    int mqttConnectAttempts_ = 0;
+
+    bool isSingleRoomHeadlessMode() const
+    {
+        return backendBaseUrl_.isEmpty() && !preferredRoomId_.isEmpty();
+    }
+
+    QString commandSubscriptionFilter() const
+    {
+        if (isSingleRoomHeadlessMode())
+            return Topics::commandTopic(preferredRoomId_, QStringLiteral("+"));
+        return QStringLiteral("classroom/+/cmd/+");
+    }
+
+    bool shouldProcessRoom(const QString &roomId) const
+    {
+        if (!isSingleRoomHeadlessMode())
+            return true;
+        return roomId.trimmed() == preferredRoomId_;
+    }
 
     // 统一更新状态文本，避免重复触发信号。
     void setStatusText(const QString &text)
@@ -410,6 +515,92 @@ private:
             return;
         statusText_ = text;
         emit statusTextChanged();
+    }
+
+    void emitRoomReady(const QString &roomId)
+    {
+        if (roomId.trimmed().isEmpty())
+            return;
+        const auto *room = findRoom(roomId);
+        const bool randomDelay = room ? room->randomDelayEnabled : readSimRandomDelayEnabled();
+        qInfo().noquote() << QStringLiteral("device_room_ready ts=%1 room=%2 mqtt_ready=%3 random_delay=%4")
+                                 .arg(traceValue(ClassInit::currentShanghaiIsoString()),
+                                      traceValue(roomId),
+                                      traceValue(mqttReady_ ? QStringLiteral("true") : QStringLiteral("false")),
+                                      traceValue(randomDelay ? QStringLiteral("true") : QStringLiteral("false")));
+    }
+
+    void emitAllRoomReadyStates()
+    {
+        if (rooms_.isEmpty()) {
+            emitRoomReady(preferredRoomId_);
+            return;
+        }
+        for (auto it = rooms_.cbegin(); it != rooms_.cend(); ++it)
+            emitRoomReady(it.key());
+    }
+
+    int nextMqttRetryDelayMs() const
+    {
+        const int exponent = qMin(mqttConnectAttempts_, 5);
+        const int base = readSimConnectRetryBaseMs();
+        const int maxDelay = readSimConnectRetryMaxMs();
+        const int backoff = qMin(maxDelay, base * (1 << exponent));
+        return backoff + QRandomGenerator::global()->bounded(base);
+    }
+
+    void scheduleMqttReconnect(const QString &detail)
+    {
+        mqttReady_ = false;
+        mqttSubscribed_ = false;
+        ++mqttConnectAttempts_;
+        const int retryDelayMs = nextMqttRetryDelayMs();
+        qWarning().noquote() << QStringLiteral("device_ready ts=%1 room=%2 broker=%3 mqtt=retrying detail=%4 retry_in_ms=%5 attempt=%6")
+                                    .arg(traceValue(ClassInit::currentShanghaiIsoString()),
+                                         traceValue(preferredRoomId_),
+                                         traceValue(brokerUrl_),
+                                         traceValue(detail),
+                                         QString::number(retryDelayMs),
+                                         QString::number(mqttConnectAttempts_));
+        setStatusText(QString("MQTT 连接失败，%1 ms 后重试: %2").arg(retryDelayMs).arg(detail));
+        mqttReconnectTimer_.start(retryDelayMs);
+    }
+
+    void onMqttConnected()
+    {
+        mqttReady_ = true;
+        mqttSubscribed_ = true;
+        mqttConnectAttempts_ = 0;
+        mqttReconnectTimer_.stop();
+        qInfo().noquote() << QStringLiteral("device_ready ts=%1 room=%2 broker=%3 mqtt=connected subscribed=true topic=%4 mode=%5")
+                                 .arg(traceValue(ClassInit::currentShanghaiIsoString()),
+                                      traceValue(preferredRoomId_),
+                                      traceValue(brokerUrl_),
+                                      traceValue(commandSubscriptionFilter()),
+                                      traceValue(isSingleRoomHeadlessMode() ? QStringLiteral("single_room_headless")
+                                                                            : QStringLiteral("multi_room")));
+        emitAllRoomReadyStates();
+        if (!rooms_.isEmpty()) {
+            for (auto it = rooms_.cbegin(); it != rooms_.cend(); ++it)
+                publishAllStates(it.key());
+        }
+        setStatusText("MQTT 已连接，等待教室接入");
+    }
+
+    void attemptMqttConnect()
+    {
+        if (mqttReady_)
+            return;
+
+        try {
+            if (!client_.is_connected())
+                client_.connect(connOpts_)->wait();
+            if (!mqttSubscribed_)
+                client_.subscribe(commandSubscriptionFilter().toStdString(), 1)->wait();
+            onMqttConnected();
+        } catch (const mqtt::exception &e) {
+            scheduleMqttReconnect(QString::fromUtf8(e.what()));
+        }
     }
 
     // 查找某个教室是否已经在本地仿真会话中。
@@ -443,6 +634,7 @@ private:
 
         SimRoomState room;
         room.roomId = normalizedRoomId;
+        room.randomDelayEnabled = readSimRandomDelayEnabled();
         const QList<Device> defaults = defaultDevicesForRoom(normalizedRoomId);
         room.devices = std::vector<Device>(defaults.begin(), defaults.end());
 
@@ -458,9 +650,9 @@ private:
 
         if (mqttReady_) {
             publishAllStates(normalizedRoomId);
-            sendHeartbeatForRoom(normalizedRoomId);
         }
 
+        emitRoomReady(normalizedRoomId);
         setStatusText(QString("已接入教室 %1 的仿真控制").arg(normalizedRoomId));
         return &inserted.value();
     }
@@ -484,7 +676,6 @@ private:
             if (wasCurrentRoom) {
                 emit currentRoomIdChanged();
                 emit deviceIdsChanged();
-                emit heartbeatPausedChanged();
                 emit randomDelayEnabledChanged();
                 emit lastDelayChanged();
             }
@@ -505,8 +696,8 @@ private:
         normalizedRooms.removeDuplicates();
 
         if (normalizedRooms.isEmpty()) {
-            if (rooms_.isEmpty())
-                ensureRoom(preferredRoomId_.isEmpty() ? QStringLiteral("A101") : preferredRoomId_);
+            if (rooms_.isEmpty() && !preferredRoomId_.isEmpty())
+                ensureRoom(preferredRoomId_);
             return;
         }
 
@@ -542,7 +733,7 @@ private:
     int nextCommandDelayMs(SimRoomState &room)
     {
         if (!room.randomDelayEnabled) {
-            room.lastDelayMs = rand_.between(500, 1800);
+            room.lastDelayMs = rand_.between(readSimDelayMinMs(), readSimDelayMaxMs());
         } else {
             const int maxDelay = 2147483000;
             const int shift = rand_.between(0, 27);
@@ -559,24 +750,64 @@ private:
         return room.lastDelayMs;
     }
 
-    // 修改设备状态并立即通过 MQTT 上报。
-    void setDeviceStatus(const QString &roomId, const QString &deviceId, DeviceStatus status)
+    SimCommandOrder currentAcceptedOrder(const SimRoomState &room, const QString &deviceId) const
     {
+        SimCommandOrder order;
+        order.epoch = room.acceptedCommandEpochs.value(deviceId, 0);
+        order.version = room.acceptedCommandVersions.value(deviceId, 0);
+        order.commandId = room.acceptedCommandIds.value(deviceId);
+        return order;
+    }
+
+    void rememberAcceptedOrder(SimRoomState &room, const QString &deviceId, const SimCommandOrder &order)
+    {
+        room.acceptedCommandEpochs.insert(deviceId, order.epoch);
+        room.acceptedCommandVersions.insert(deviceId, order.version);
+        room.acceptedCommandIds.insert(deviceId, order.commandId);
+    }
+
+    bool isCurrentAcceptedOrder(const SimRoomState &room, const QString &deviceId, const SimCommandOrder &order) const
+    {
+        return simOrderEqual(currentAcceptedOrder(room, deviceId), order);
+    }
+
+    // 修改设备状态并立即通过 MQTT 上报。
+    void setDeviceStatus(const QString &roomId,
+                         const QString &deviceId,
+                         DeviceStatus status,
+                         const SimCommandOrder &order = {})
+    {
+        auto *room = findRoom(roomId);
         auto *device = findDevice(roomId, deviceId);
-        if (!device)
+        if (!room || !device)
             return;
         device->status = status;
-        publishState(roomId, *device);
+        publishState(roomId, *device, order);
     }
 
     // 发送单台设备的状态上报。
-    void publishState(const QString &roomId, const Device &device)
+    void publishState(const QString &roomId, const Device &device, const SimCommandOrder &order = {})
     {
         if (!mqttReady_)
             return;
 
         QJsonObject obj = device.toJson();
-        obj["timestamp"] = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
+        obj["timestamp"] = ClassInit::currentShanghaiIsoString();
+        if (order.isValid()) {
+            obj["applied_command_id"] = order.commandId;
+            obj["applied_command_epoch"] = QString::number(order.epoch);
+            obj["applied_device_command_version"] = QString::number(order.version);
+        }
+        logDeviceTrace(QStringLiteral("device_state_publish"),
+                       QStringLiteral("emit"),
+                       roomId,
+                       device.id,
+                       QString(),
+                       order.commandId,
+                       order.epoch,
+                       order.version,
+                       obj.value("status").toString(),
+                       QStringLiteral("name=%1").arg(traceValue(device.name)));
         try {
             auto msg = mqtt::make_message(
                 Topics::stateTopic(roomId, device.id).toStdString(),
@@ -612,7 +843,7 @@ private:
         obj["device_id"] = deviceId;
         obj["message"] = message;
         obj["level"] = level;
-        obj["timestamp"] = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
+        obj["timestamp"] = ClassInit::currentShanghaiIsoString();
         try {
             auto msg = mqtt::make_message(
                 Topics::alertTopic(roomId, deviceId).toStdString(),
@@ -633,6 +864,21 @@ private:
 
         const QString roomId = parts[1].trimmed();
         const QString deviceId = parts[3].trimmed();
+        if (!shouldProcessRoom(roomId)) {
+            logDeviceTrace(QStringLiteral("device_ignore_foreign_room"),
+                           QStringLiteral("ignored"),
+                           roomId,
+                           deviceId,
+                           QString(),
+                           QString(),
+                           0,
+                           0,
+                           QString(),
+                           QStringLiteral("preferred_room=%1 topic=%2")
+                               .arg(traceValue(preferredRoomId_), traceValue(topic)));
+            return;
+        }
+
         auto *room = ensureRoom(roomId);
         if (!room)
             return;
@@ -643,105 +889,204 @@ private:
         }
 
         const QJsonDocument doc = QJsonDocument::fromJson(payload);
-        const QString action = doc.object().value("action").toString();
+        const QJsonObject body = doc.object();
+        const QString action = body.value("action").toString();
+        SimCommandOrder order;
+        order.commandId = body.value("command_id").toString();
+        order.epoch = body.value("command_epoch").toVariant().toULongLong();
+        order.version = body.value("device_command_version").toVariant().toULongLong();
         auto *device = findDevice(roomId, deviceId);
         if (!device)
             return;
 
+        logDeviceTrace(QStringLiteral("device_receive"),
+                       QStringLiteral("received"),
+                       roomId,
+                       deviceId,
+                       action,
+                       order.commandId,
+                       order.epoch,
+                       order.version,
+                       traceValue(device->toJson().value("status").toString()),
+                       QStringLiteral("payload=%1").arg(traceValue(QString::fromUtf8(QJsonDocument(body).toJson(QJsonDocument::Compact)))));
+
+        if (order.isValid()) {
+            const SimCommandOrder currentOrder = currentAcceptedOrder(*room, deviceId);
+            if (currentOrder.isValid() && !simOrderLess(currentOrder, order)) {
+                logDeviceTrace(QStringLiteral("device_drop_stale"),
+                               QStringLiteral("dropped"),
+                               roomId,
+                               deviceId,
+                               action,
+                               order.commandId,
+                               order.epoch,
+                               order.version,
+                               traceValue(device->toJson().value("status").toString()),
+                               QStringLiteral("current_epoch=%1 current_version=%2 current_command_id=%3")
+                                   .arg(QString::number(currentOrder.epoch),
+                                        QString::number(currentOrder.version),
+                                        traceValue(currentOrder.commandId)));
+                setStatusText(QString("教室 %1 设备 %2 丢弃旧命令 epoch=%3 version=%4")
+                                  .arg(roomId, deviceId)
+                                  .arg(order.epoch)
+                                  .arg(order.version));
+                return;
+            }
+            rememberAcceptedOrder(*room, deviceId, order);
+        }
+
         if (action == "power_on") {
-            startDevice(roomId, deviceId);
+            startDevice(roomId, deviceId, order);
         } else if (action == "power_off") {
             const int delay = nextCommandDelayMs(*room);
+            logDeviceTrace(QStringLiteral("device_apply_start"),
+                           QStringLiteral("scheduled"),
+                           roomId,
+                           deviceId,
+                           action,
+                           order.commandId,
+                           order.epoch,
+                           order.version,
+                           traceValue(device->toJson().value("status").toString()),
+                           QStringLiteral("delay_ms=%1").arg(delay));
             setStatusText(QString("教室 %1 设备 %2 收到关机指令，预计 %3 ms 执行")
                               .arg(roomId, deviceId)
                               .arg(delay));
-            QTimer::singleShot(delay, this, [this, roomId, deviceId]() {
+            QTimer::singleShot(delay, this, [this, roomId, deviceId, order]() {
                 auto *targetRoom = findRoom(roomId);
                 auto *targetDevice = findDevice(roomId, deviceId);
                 if (!targetRoom || !targetDevice)
                     return;
+                if (order.isValid() && !isCurrentAcceptedOrder(*targetRoom, deviceId, order))
+                    return;
                 if (targetRoom->forcedOfflineDevices.contains(deviceId)) {
                     targetDevice->status = DeviceStatus::Offline;
-                    publishState(roomId, *targetDevice);
+                    logDeviceTrace(QStringLiteral("device_apply_done"),
+                                   QStringLiteral("offline"),
+                                   roomId,
+                                   deviceId,
+                                   QStringLiteral("power_off"),
+                                   order.commandId,
+                                   order.epoch,
+                                   order.version,
+                                   traceValue(targetDevice->toJson().value("status").toString()),
+                                   QStringLiteral("forced_offline"));
+                    publishState(roomId, *targetDevice, order);
                     return;
                 }
                 targetDevice->status = DeviceStatus::Off;
-                publishState(roomId, *targetDevice);
+                logDeviceTrace(QStringLiteral("device_apply_done"),
+                               QStringLiteral("off"),
+                               roomId,
+                               deviceId,
+                               QStringLiteral("power_off"),
+                               order.commandId,
+                               order.epoch,
+                               order.version,
+                               traceValue(targetDevice->toJson().value("status").toString()),
+                               QStringLiteral("delay_elapsed"));
+                publishState(roomId, *targetDevice, order);
                 setStatusText(QString("教室 %1 设备 %2 已关机").arg(roomId, deviceId));
             });
         }
     }
 
     // 模拟设备开机过程。
-    void startDevice(const QString &roomId, const QString &deviceId)
+    void startDevice(const QString &roomId, const QString &deviceId, const SimCommandOrder &order = {})
     {
         auto *room = findRoom(roomId);
         auto *device = findDevice(roomId, deviceId);
         if (!room || !device)
             return;
 
-        if (device->status == DeviceStatus::On || device->status == DeviceStatus::Starting)
+        if (device->status == DeviceStatus::On || device->status == DeviceStatus::Starting) {
+            logDeviceTrace(QStringLiteral("device_apply_start"),
+                           QStringLiteral("noop"),
+                           roomId,
+                           deviceId,
+                           QStringLiteral("power_on"),
+                           order.commandId,
+                           order.epoch,
+                           order.version,
+                           traceValue(device->toJson().value("status").toString()),
+                           QStringLiteral("already_on_or_starting"));
+            publishState(roomId, *device, order);
             return;
+        }
 
         device->status = DeviceStatus::Starting;
-        publishState(roomId, *device);
+        logDeviceTrace(QStringLiteral("device_apply_start"),
+                       QStringLiteral("starting"),
+                       roomId,
+                       deviceId,
+                       QStringLiteral("power_on"),
+                       order.commandId,
+                       order.epoch,
+                       order.version,
+                       traceValue(device->toJson().value("status").toString()),
+                       QStringLiteral("starting"));
+        publishState(roomId, *device, order);
 
         const int delay = nextCommandDelayMs(*room);
         setStatusText(QString("教室 %1 设备 %2 收到开机指令，预计 %3 ms 执行")
                           .arg(roomId, deviceId)
                           .arg(delay));
-        QTimer::singleShot(delay, this, [this, roomId, deviceId]() {
+        QTimer::singleShot(delay, this, [this, roomId, deviceId, order]() {
             auto *targetRoom = findRoom(roomId);
             auto *targetDevice = findDevice(roomId, deviceId);
             if (!targetRoom || !targetDevice)
                 return;
+            if (order.isValid() && !isCurrentAcceptedOrder(*targetRoom, deviceId, order))
+                return;
 
             if (targetRoom->forcedOfflineDevices.contains(deviceId)) {
                 targetDevice->status = DeviceStatus::Offline;
-                publishState(roomId, *targetDevice);
+                logDeviceTrace(QStringLiteral("device_apply_done"),
+                               QStringLiteral("offline"),
+                               roomId,
+                               deviceId,
+                               QStringLiteral("power_on"),
+                               order.commandId,
+                               order.epoch,
+                               order.version,
+                               traceValue(targetDevice->toJson().value("status").toString()),
+                               QStringLiteral("forced_offline"));
+                publishState(roomId, *targetDevice, order);
                 return;
             }
-            if (rand_.hitPercent(1.8)) {
+            if (rand_.hitPercent(readSimFaultPercent())) {
                 targetDevice->status = DeviceStatus::Fault;
-                publishState(roomId, *targetDevice);
+                logDeviceTrace(QStringLiteral("device_fault_injected"),
+                               QStringLiteral("fault"),
+                               roomId,
+                               deviceId,
+                               QStringLiteral("power_on"),
+                               order.commandId,
+                               order.epoch,
+                               order.version,
+                               traceValue(targetDevice->toJson().value("status").toString()),
+                               QStringLiteral("fault_percent=%1").arg(QString::number(readSimFaultPercent(), 'f', 2)));
+                publishState(roomId, *targetDevice, order);
                 publishAlert(roomId, deviceId, "启动失败，设备故障", "critical");
                 setStatusText(QString("教室 %1 设备 %2 启动故障").arg(roomId, deviceId));
             } else {
                 targetDevice->status = DeviceStatus::On;
-                publishState(roomId, *targetDevice);
+                logDeviceTrace(QStringLiteral("device_apply_done"),
+                               QStringLiteral("on"),
+                               roomId,
+                               deviceId,
+                               QStringLiteral("power_on"),
+                               order.commandId,
+                               order.epoch,
+                               order.version,
+                               traceValue(targetDevice->toJson().value("status").toString()),
+                               QStringLiteral("delay_elapsed"));
+                publishState(roomId, *targetDevice, order);
                 setStatusText(QString("教室 %1 设备 %2 已开机").arg(roomId, deviceId));
             }
         });
     }
 
-    // 给某一个教室发送心跳，并顺手补发状态。
-    void sendHeartbeatForRoom(const QString &roomId)
-    {
-        const auto *room = findRoom(roomId);
-        if (!room || room->heartbeatPaused || !mqttReady_)
-            return;
-
-        const QString ts = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
-        try {
-            auto msg = mqtt::make_message(
-                Topics::heartbeatTopic(roomId).toStdString(),
-                ts.toStdString());
-            msg->set_qos(0);
-            client_.publish(msg);
-            publishAllStates(roomId);
-        } catch (const mqtt::exception &e) {
-            setStatusText(QString("教室 %1 心跳上报失败: %2").arg(roomId, e.what()));
-        }
-    }
-
-private slots:
-    // 定时对所有教室发送心跳。
-    void sendHeartbeat()
-    {
-        const QStringList allRooms = rooms_.keys();
-        for (const auto &roomId : allRooms)
-            sendHeartbeatForRoom(roomId);
-    }
 };
 
 // 仿真端主入口：支持 headless 模式，也支持带 QML 的图形模式。
@@ -756,8 +1101,9 @@ int main(int argc, char **argv)
     // 无界面模式只跑后台逻辑，不创建 QML 界面，适合命令行调试和自动化测试。
     if (headless) {
         QCoreApplication app(argc, argv);
+        ClassInit::loadRuntimeEnvDefaults();
         const QStringList args = positionalArgs(app.arguments());
-        const QString roomId = ClassInit::argOrDefault(args, 1, "A101");
+        const QString roomId = ClassInit::argOrDefault(args, 1, "");
         const QString broker = ClassInit::argOrDefault(args, 2, "tcp://127.0.0.1:1883");
         DeviceSimClient sim(roomId, broker, QString());
         qInfo("device simulator running in headless mode: room=%s broker=%s",
@@ -771,8 +1117,9 @@ int main(int argc, char **argv)
     QQuickStyle::setFallbackStyle("Basic");
 
     QGuiApplication app(argc, argv);
+    ClassInit::loadRuntimeEnvDefaults();
     const QStringList args = positionalArgs(app.arguments());
-    const QString roomId = ClassInit::argOrDefault(args, 1, "A101");
+    const QString roomId = ClassInit::argOrDefault(args, 1, "");
     const QString broker = ClassInit::argOrDefault(args, 2, "tcp://127.0.0.1:1883");
     const QString backendUrl = qEnvironmentVariable("SIM_BACKEND_URL", "http://127.0.0.1:8080");
 

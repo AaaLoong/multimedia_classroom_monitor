@@ -18,6 +18,7 @@ int main(int argc, char **argv)
     QQuickStyle::setStyle("Material");
     QQuickStyle::setFallbackStyle("Basic");
     QGuiApplication app(argc, argv);
+    ClassInit::loadRuntimeEnvDefaults();
     QQmlApplicationEngine engine;
 
     DeviceModel deviceModel;

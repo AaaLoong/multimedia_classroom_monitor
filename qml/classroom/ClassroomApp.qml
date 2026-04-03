@@ -21,16 +21,23 @@ ApplicationWindow {
     Material.foreground: Common.Theme.textPrimary
 
     property string roomId: ""
-    property string selectedBuilding: "A"
-    property string selectedFloor: "1"
-    property string selectedRoomSuffix: "01"
-    property string inputRoomId: selectedBuilding + selectedFloor + selectedRoomSuffix
+    property string selectedBuilding: ""
+    property string selectedFloor: ""
+    property string selectedRoomSuffix: ""
+    property string manualRoomId: ""
+    property string inputRoomId: manualRoomId.trim() !== ""
+        ? manualRoomId.trim()
+        : ((selectedBuilding !== "" && selectedFloor !== "" && selectedRoomSuffix !== "")
+            ? (selectedBuilding + selectedFloor + selectedRoomSuffix)
+            : "")
     property bool locked: api.locked
     property bool manualRefresh: false
+    property bool bindingChecking: true
     property bool backendReady: false
     property bool registered: api.registered
-    property string statusText: "请选择教室号完成接入"
+    property string statusText: "正在验证终端身份..."
     property string pendingBulkAction: ""
+    property string awaitingBulkCompletionAction: ""
     property bool bulkControlLocked: false
     property double bulkControlUnlockAtMs: 0
     property int syncedDeviceCount: 0
@@ -41,29 +48,6 @@ ApplicationWindow {
     property var buildingOptions: ["A", "B", "C", "D"]
     property var floorOptions: ["1", "2", "3", "4", "5", "6", "7"]
     property var roomSuffixOptions: ["01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12"]
-    property var defaultDevices: [
-        { "room_id": roomId, "device_id": "proj", "name": "投影仪", "status": "off" },
-        { "room_id": roomId, "device_id": "amp", "name": "功放", "status": "off" },
-        { "room_id": roomId, "device_id": "pc", "name": "讲台电脑", "status": "off" },
-        { "room_id": roomId, "device_id": "mic", "name": "无线麦克风", "status": "off" },
-        { "room_id": roomId, "device_id": "screen", "name": "电动幕布", "status": "off" }
-    ]
-
-    function formatTimestamp(ts) {
-        if (!ts)
-            return ""
-        let s = String(ts).trim()
-        const m = s.match(/^(\d{4}-\d{2}-\d{2})[T\s](\d{2}):(\d{2})/)
-        if (m)
-            return m[1] + " " + m[2] + ":" + m[3]
-        const d = new Date(s)
-        if (!isNaN(d.getTime())) {
-            const p2 = function(n) { return n < 10 ? "0" + n : "" + n }
-            return d.getFullYear() + "-" + p2(d.getMonth() + 1) + "-" + p2(d.getDate()) + " " + p2(d.getHours()) + ":" + p2(d.getMinutes())
-        }
-        return s
-    }
-
     function validateRoomId(rid) {
         return /^([A-Da-d])([1-7])(0[1-9]|1[0-2])$/.test(String(rid).trim())
     }
@@ -141,14 +125,20 @@ ApplicationWindow {
     function currentRoomIdOrError() {
         const rid = window.inputRoomId.trim()
         if (!rid) {
-            window.statusText = "请先选择教室号"
+            window.statusText = "请先输入或选择教室号"
             return ""
         }
-        if (!window.validateRoomId(rid)) {
+        if (!window.manualRoomId.trim() && !window.validateRoomId(rid)) {
             window.statusText = "教室号不在允许范围内"
             return ""
         }
         return rid
+    }
+
+    function beginBindingLookup() {
+        window.bindingChecking = true
+        window.statusText = "正在验证终端身份..."
+        api.fetchBindingByFingerprint(terminalFingerprint)
     }
 
     function randomFallbackPollInterval() {
@@ -248,6 +238,7 @@ ApplicationWindow {
         }
 
         if (sendCount === 0) {
+            window.awaitingBulkCompletionAction = ""
             if (skippedOffline > 0) {
                 window.statusText = action === "power_on"
                     ? "没有可执行上课开机的设备，离线设备已跳过"
@@ -260,9 +251,29 @@ ApplicationWindow {
             return
         }
 
+        window.awaitingBulkCompletionAction = action
         window.statusText = (action === "power_on" ? "一键上课已下发 " : "一键下课已下发 ")
             + sendCount + " 台设备"
             + (skippedOffline > 0 ? ("，跳过 " + skippedOffline + " 台离线设备") : "")
+    }
+
+    function hasBulkActionCompleted(action, devices) {
+        if (!action || !devices || devices.length === 0)
+            return false
+
+        let matched = 0
+        for (let i = 0; i < devices.length; ++i) {
+            const d = devices[i]
+            const st = String(d.status ? d.status : "").toLowerCase()
+            if (st === "offline")
+                continue
+            matched += 1
+            if (action === "power_on" && st !== "on")
+                return false
+            if (action === "power_off" && st !== "off")
+                return false
+        }
+        return matched > 0
     }
 
     function requestBulkAction(action) {
@@ -291,10 +302,11 @@ ApplicationWindow {
     }
 
     Component.onCompleted: {
-        if (!applyRoomIdSelection((typeof initialRoomId !== "undefined" && initialRoomId) ? initialRoomId : "A101"))
-            applyRoomIdSelection("A101")
-        deviceModel.setDevices(defaultDevices)
+        if (typeof initialRoomId !== "undefined" && initialRoomId)
+            applyRoomIdSelection(initialRoomId)
+        deviceModel.refresh()
         api.fetchLock()
+        window.beginBindingLookup()
     }
 
     Timer {
@@ -334,70 +346,157 @@ ApplicationWindow {
     Dialog {
         id: reportDialog
         modal: true
-        width: 380
-        height: 230
+        width: 520
+        height: 320
         x: (window.width - width) / 2
         y: (window.height - height) / 2
         standardButtons: Dialog.NoButton
 
         background: Common.SurfaceCard {
-            padding: Common.Theme.spaceL
+            padding: 0
         }
 
-        contentItem: ColumnLayout {
+        contentItem: Item {
             anchors.fill: parent
-            spacing: Common.Theme.spaceM
+            clip: true
 
-            Text {
-                text: "设备报修"
-                color: Common.Theme.textPrimary
-                font.family: Common.Theme.fontFamily
-                font.pixelSize: 20
-                font.bold: true
-            }
+            ColumnLayout {
+                anchors.fill: parent
+                spacing: 0
 
-            Text {
-                text: window.displayDeviceTitle(window.pendingReportDevice.name, window.pendingReportDevice.deviceId)
-                color: Common.Theme.textSecondary
-                font.family: Common.Theme.fontFamily
-                font.pixelSize: 13
-            }
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    Layout.margins: Common.Theme.spaceXL
+                    spacing: Common.Theme.spaceL
 
-            TextArea {
-                id: reportInput
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-                placeholderText: "请描述设备问题..."
-                wrapMode: TextEdit.Wrap
-            }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: Common.Theme.spaceM
 
-            RowLayout {
-                Layout.fillWidth: true
-                Item { Layout.fillWidth: true }
+                        Rectangle {
+                            width: 54
+                            height: 54
+                            radius: 18
+                            color: "#e9f1ff"
 
-                Common.ActionButton {
-                    text: "取消"
-                    variant: "secondary"
-                    minWidth: 80
-                    onClicked: reportDialog.close()
+                            Text {
+                                anchors.centerIn: parent
+                                text: "修"
+                                color: Common.Theme.accent
+                                font.family: Common.Theme.fontFamily
+                                font.pixelSize: 24
+                                font.bold: true
+                            }
+                        }
+
+                        Column {
+                            Layout.fillWidth: true
+                            spacing: 6
+
+                            Text {
+                                text: "设备报修"
+                                color: Common.Theme.textPrimary
+                                font.family: Common.Theme.fontFamily
+                                font.pixelSize: 28
+                                font.bold: true
+                            }
+
+                            Text {
+                                width: parent.width
+                                text: "设备：" + window.displayDeviceTitle(window.pendingReportDevice.name, window.pendingReportDevice.deviceId)
+                                color: Common.Theme.textSecondary
+                                font.family: Common.Theme.fontFamily
+                                font.pixelSize: 14
+                                elide: Text.ElideRight
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        radius: Common.Theme.radiusM
+                        color: "#f7faff"
+                        border.width: 1
+                        border.color: reportInput.activeFocus ? Common.Theme.accent : "#cfd8e6"
+
+                        TextArea {
+                            id: reportInput
+                            anchors.fill: parent
+                            anchors.margins: 2
+                            color: Common.Theme.textPrimary
+                            font.family: Common.Theme.fontFamily
+                            font.pixelSize: 16
+                            inputMethodHints: Qt.ImhMultiLine
+                            wrapMode: TextEdit.Wrap
+                            leftPadding: 16
+                            rightPadding: 16
+                            topPadding: 16
+                            bottomPadding: 16
+                            selectByMouse: true
+                            background: Item {}
+                        }
+
+                        Text {
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.top: parent.top
+                            anchors.leftMargin: reportInput.leftPadding + 2
+                            anchors.rightMargin: reportInput.rightPadding + 2
+                            anchors.topMargin: reportInput.topPadding + 2
+                            visible: reportInput.length === 0 && !reportInput.preeditText
+                            text: "请描述设备问题、故障现象和出现时间..."
+                            color: "#9aa9bf"
+                            font.family: reportInput.font.family
+                            font.pixelSize: reportInput.font.pixelSize
+                            wrapMode: Text.WordWrap
+                        }
+                    }
+                }
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 1
+                    color: "#e4ebf5"
                 }
 
-                Common.ActionButton {
-                    text: "提交"
-                    minWidth: 80
-                    onClicked: {
-                        const msg = reportInput.text.trim()
-                        if (!msg) {
-                            window.statusText = "请先输入问题描述"
-                            return
+                Item {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 86
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.margins: Common.Theme.spaceL
+                        spacing: Common.Theme.spaceM
+
+                        Item { Layout.fillWidth: true }
+
+                        Common.ActionButton {
+                            text: "取消"
+                            variant: "secondary"
+                            minWidth: 104
+                            onClicked: reportDialog.close()
                         }
-                        if (!window.pendingReportDevice || !window.pendingReportDevice.deviceId) {
-                            window.statusText = "未选中设备"
-                            return
+
+                        Common.ActionButton {
+                            text: "提交"
+                            minWidth: 128
+                            enabled: reportInput.text.trim().length > 0
+                            onClicked: {
+                                const msg = reportInput.text.trim()
+                                if (!msg) {
+                                    window.statusText = "请先输入问题描述"
+                                    return
+                                }
+                                if (!window.pendingReportDevice || !window.pendingReportDevice.deviceId) {
+                                    window.statusText = "未选中设备"
+                                    return
+                                }
+                                window.statusText = "正在提交报修..."
+                                api.submitReport(window.pendingReportDevice.roomId, window.pendingReportDevice.deviceId, msg)
+                                reportDialog.close()
+                            }
                         }
-                        window.statusText = "正在提交报修..."
-                        api.submitReport(window.pendingReportDevice.roomId, window.pendingReportDevice.deviceId, msg)
-                        reportDialog.close()
                     }
                 }
             }
@@ -411,7 +510,6 @@ ApplicationWindow {
             required property string deviceId
             required property string name
             required property string status
-            required property string updated
             width: ListView.view.width
             height: deviceContent.implicitHeight + Common.Theme.spaceL * 2
             radius: Common.Theme.radiusM
@@ -444,15 +542,6 @@ ApplicationWindow {
                         toneColor: Common.Theme.deviceStatusColor(status)
                         fillColor: Common.Theme.deviceStatusFill(status)
                     }
-                }
-
-                Text {
-                    width: parent.width
-                    text: "最近上报 " + window.formatTimestamp(updated)
-                    color: Common.Theme.textSecondary
-                    font.family: Common.Theme.fontFamily
-                    font.pixelSize: 12
-                    elide: Text.ElideRight
                 }
 
                 Flow {
@@ -497,10 +586,12 @@ ApplicationWindow {
         busy: api.busy
         bulkControlLocked: window.bulkControlLocked
         registered: window.registered
+        bindingChecking: window.bindingChecking
         backendReady: window.backendReady
         roomId: window.roomId
         headerTitle: window.registered ? ("教室 " + window.roomId + " 控制台") : "教室接入控制台"
         inputRoomId: window.inputRoomId
+        manualRoomText: window.manualRoomId
         statusText: window.statusText
         deviceCount: window.syncedDeviceCount
         onlineCount: window.syncedOnlineCount
@@ -543,11 +634,6 @@ ApplicationWindow {
     }
 
     Connections {
-        target: form.heartbeatButton
-        function onClicked() { api.sendHeartbeat(window.roomId) }
-    }
-
-    Connections {
         target: form.buildingCombo
         function onActivated() { window.selectedBuilding = form.buildingCombo.currentText }
     }
@@ -563,13 +649,8 @@ ApplicationWindow {
     }
 
     Connections {
-        target: form.checkStatusButton
-        function onClicked() {
-            const rid = window.currentRoomIdOrError()
-            if (!rid)
-                return
-            api.fetchRegistration(rid)
-        }
+        target: form.manualRoomField
+        function onTextChanged() { window.manualRoomId = form.manualRoomField.text }
     }
 
     Connections {
@@ -578,7 +659,7 @@ ApplicationWindow {
             const rid = window.currentRoomIdOrError()
             if (!rid)
                 return
-            api.registerClassroom(rid)
+            api.registerClassroomWithFingerprint(rid, terminalFingerprint)
         }
     }
 
@@ -602,12 +683,16 @@ ApplicationWindow {
                     scoped.push(d)
             }
 
-            let displayDevices = scoped
-            if (scoped.length === 0 && deviceModel.rowCount() === 0 && !window.locked)
-                displayDevices = window.defaultDevices
+            deviceModel.setDevices(scoped)
+            window.updateDeviceStats(scoped)
 
-            deviceModel.setDevices(displayDevices)
-            window.updateDeviceStats(displayDevices)
+            if (window.awaitingBulkCompletionAction
+                    && window.hasBulkActionCompleted(window.awaitingBulkCompletionAction, scoped)) {
+                window.statusText = window.awaitingBulkCompletionAction === "power_on"
+                    ? "已执行上课"
+                    : "已执行下课"
+                window.awaitingBulkCompletionAction = ""
+            }
 
             const pendingAction = window.pendingBulkAction
             window.pendingBulkAction = ""
@@ -627,16 +712,36 @@ ApplicationWindow {
         function onRegistrationChanged(v) {
             window.registered = v
             if (v) {
-                window.roomId = window.inputRoomId.trim()
-                window.statusText = "注册成功，正在同步设备..."
+                const resolvedRoomId = api.boundRoomId ? api.boundRoomId.trim() : ""
+                if (!resolvedRoomId) {
+                    window.registered = false
+                    window.bindingChecking = false
+                    window.backendReady = false
+                    window.roomId = ""
+                    api.stopEventStream()
+                    classroomFallbackDeviceTimer.stop()
+                    classroomEventRefreshTimer.stop()
+                    deviceModel.refresh()
+                    window.resetDeviceStats()
+                    window.awaitingBulkCompletionAction = ""
+                    window.statusText = "未获取到有效绑定房号，请重新接入"
+                    return
+                }
+                window.roomId = resolvedRoomId
+                window.bindingChecking = false
+                if (!window.manualRoomId.trim() && window.validateRoomId(resolvedRoomId))
+                    window.applyRoomIdSelection(resolvedRoomId)
+                window.statusText = "终端已绑定教室，正在同步设备..."
                 window.manualRefresh = false
                 api.startClassroomEventStream(window.roomId)
                 window.rescheduleFallbackPolling()
                 api.fetchDevicesByRoom(window.roomId)
             } else {
+                window.bindingChecking = false
                 window.statusText = "教室未注册，请先完成接入"
                 window.backendReady = false
                 window.roomId = ""
+                window.awaitingBulkCompletionAction = ""
                 api.stopEventStream()
                 classroomFallbackDeviceTimer.stop()
                 classroomEventRefreshTimer.stop()
@@ -647,9 +752,11 @@ ApplicationWindow {
 
         function onRegistrationCheckedChanged(checked) {
             if (checked && !window.registered) {
-                window.statusText = "当前教室尚未注册，可立即发起接入"
+                window.bindingChecking = false
+                window.statusText = "当前终端尚未绑定教室，请完成接入注册"
                 window.backendReady = false
             } else if (checked && window.registered) {
+                window.bindingChecking = false
                 window.statusText = "教室已接入，正在同步设备..."
             }
         }
@@ -670,8 +777,10 @@ ApplicationWindow {
                 return
             if (!registered) {
                 window.registered = false
+                window.bindingChecking = false
                 window.roomId = ""
                 window.backendReady = false
+                window.awaitingBulkCompletionAction = ""
                 api.stopEventStream()
                 classroomFallbackDeviceTimer.stop()
                 classroomEventRefreshTimer.stop()
@@ -686,11 +795,16 @@ ApplicationWindow {
                 window.statusText = "控制指令已发送，请稍候查看设备状态"
             else if (action === "report")
                 window.statusText = "报修已提交，请等待管理员处理"
+            else if (action === "register")
+                window.statusText = "终端绑定成功，正在同步设备..."
             else
                 window.statusText = message
         }
         function onError(message) {
             window.pendingBulkAction = ""
+            window.awaitingBulkCompletionAction = ""
+            if (window.bindingChecking)
+                window.bindingChecking = false
             window.statusText = message
         }
     }

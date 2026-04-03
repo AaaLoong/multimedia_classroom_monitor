@@ -12,14 +12,15 @@ Item {
 
     default property alias actionData: actionsRow.data
 
-    implicitHeight: subtitle.length > 0 ? 54 : 32
-    clip: true
+    implicitHeight: Math.max(textColumn.implicitHeight, actionsRow.implicitHeight)
+    clip: false
 
     RowLayout {
         anchors.fill: parent
         spacing: Common.Theme.spaceM
 
         ColumnLayout {
+            id: textColumn
             Layout.fillWidth: true
             spacing: 2
 

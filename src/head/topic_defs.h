@@ -21,9 +21,4 @@ inline QString alertTopic(const QString &roomId, const QString &deviceId)
     return QStringLiteral("classroom/%1/alert/%2").arg(roomId, deviceId);
 }
 
-// 教室心跳主题：classroom/<roomId>/heartbeat
-inline QString heartbeatTopic(const QString &roomId)
-{
-    return QStringLiteral("classroom/%1/heartbeat").arg(roomId);
-}
 } // 主题命名空间结束

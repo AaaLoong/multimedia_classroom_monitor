@@ -74,6 +74,22 @@ static QString errorMessageFromDocument(const QJsonDocument &doc, const QString 
             return QStringLiteral("当前账号不支持修改密码");
         if (error == "invalid_current_password")
             return QStringLiteral("当前密码错误");
+        if (error == "invalid_room")
+            return QStringLiteral("教室号无效");
+        if (error == "invalid_fingerprint")
+            return QStringLiteral("终端特征码无效");
+        if (error == "register_failed")
+            return QStringLiteral("教室接入失败");
+        if (error == "unregister_failed")
+            return QStringLiteral("取消教室接入失败");
+        if (error == "invalid_alert")
+            return QStringLiteral("告警记录无效");
+        if (error == "alert_not_found")
+            return QStringLiteral("未找到可处理的告警");
+        if (error == "room_already_bound")
+            return QStringLiteral("该教室已绑定其他终端，请联系管理员处理");
+        if (error == "fingerprint_already_bound")
+            return QStringLiteral("当前终端已绑定其他教室，请联系管理员处理");
         if (error == "forbidden")
             return QStringLiteral("当前账号没有权限执行此操作");
         if (error == "create_admin_failed")
@@ -88,6 +104,11 @@ static QString errorMessageFromDocument(const QJsonDocument &doc, const QString 
             return error;
     }
     return fallback;
+}
+
+static QString encodePathSegment(const QString &value)
+{
+    return QString::fromUtf8(QUrl::toPercentEncoding(value.trimmed()));
 }
 
 void RestClient::updateAdminSessionFromJson(const QJsonDocument &doc)
@@ -512,6 +533,36 @@ void RestClient::fetchAlerts()
     });
 }
 
+void RestClient::resolveAlert(int alertId)
+{
+    if (alertId <= 0) {
+        emit error(QStringLiteral("告警记录无效"));
+        return;
+    }
+    setBusy(true);
+    auto reply = nam_.post(makeRequest(QString("/alerts/%1/resolve").arg(alertId)), QByteArray());
+    handleReply(reply, [=](const QJsonDocument &) {
+        emit operationFinished("alert_resolve", QStringLiteral("告警已处理"));
+        fetchAlerts();
+    });
+}
+
+void RestClient::resolveAllAlerts()
+{
+    setBusy(true);
+    auto reply = nam_.post(makeRequest("/alerts/resolve-all"), QByteArray());
+    handleReply(reply, [=](const QJsonDocument &doc) {
+        int count = 0;
+        if (doc.isObject())
+            count = doc.object().value("resolved_count").toInt();
+        emit operationFinished("alerts_resolve_all",
+                               count > 0
+                                   ? QStringLiteral("已处理 %1 条告警").arg(count)
+                                   : QStringLiteral("当前没有可处理的告警"));
+        fetchAlerts();
+    });
+}
+
 // 拉取当前锁定状态。
 void RestClient::fetchLock()
 {
@@ -541,7 +592,8 @@ void RestClient::sendCommand(const QString &roomId, const QString &deviceId, con
     setBusy(true);
     QJsonObject obj;
     obj["action"] = action;
-    const QString path = QString("/devices/%1/%2/command").arg(roomId, deviceId);
+    const QString path = QString("/devices/%1/%2/command")
+        .arg(encodePathSegment(roomId), encodePathSegment(deviceId));
     auto reply = nam_.post(makeRequest(path), QJsonDocument(obj).toJson(QJsonDocument::Compact));
     handleReply(reply, [=](const QJsonDocument &doc) {
         const auto o = doc.object();
@@ -566,7 +618,8 @@ void RestClient::submitReport(const QString &roomId, const QString &deviceId, co
     setBusy(true);
     QJsonObject obj;
     obj["message"] = message;
-    const QString path = QString("/devices/%1/%2/report").arg(roomId, deviceId);
+    const QString path = QString("/devices/%1/%2/report")
+        .arg(encodePathSegment(roomId), encodePathSegment(deviceId));
     auto reply = nam_.post(makeRequest(path), QJsonDocument(obj).toJson(QJsonDocument::Compact));
     handleReply(reply, [=](const QJsonDocument &doc) {
         Q_UNUSED(doc);
@@ -586,21 +639,12 @@ void RestClient::setLock(bool locked)
     });
 }
 
-// 教室心跳只负责上报在线状态，不需要额外响应内容。
-void RestClient::sendHeartbeat(const QString &roomId)
-{
-    if (roomId.isEmpty())
-        return;
-    auto reply = nam_.post(makeRequest(QString("/heartbeat/%1").arg(roomId)), QByteArray());
-    handleReply(reply, [=](const QJsonDocument &) {});
-}
-
 // 查询当前教室是否已经注册。
 void RestClient::fetchRegistration(const QString &roomId)
 {
     if (roomId.isEmpty())
         return;
-    auto reply = nam_.get(makeRequest(QString("/classrooms/%1/registration").arg(roomId)));
+    auto reply = nam_.get(makeRequest(QString("/classrooms/%1/registration").arg(encodePathSegment(roomId))));
     handleReply(reply, [=](const QJsonDocument &doc) {
         updateRegistrationFromJson(doc);
     });
@@ -614,7 +658,29 @@ void RestClient::registerClassroom(const QString &roomId)
         return;
     }
     setBusy(true);
-    auto reply = nam_.post(makeRequest(QString("/classrooms/%1/register").arg(roomId)), QByteArray());
+    auto reply = nam_.post(makeRequest(QString("/classrooms/%1/register").arg(encodePathSegment(roomId))), QByteArray());
+    handleReply(reply, [=](const QJsonDocument &doc) {
+        updateRegistrationFromJson(doc);
+        emit operationFinished("register", QStringLiteral("教室已接入，注册完成"));
+    });
+}
+
+void RestClient::registerClassroomWithFingerprint(const QString &roomId, const QString &fingerprint)
+{
+    if (roomId.isEmpty()) {
+        emit error(QStringLiteral("教室ID为空，无法注册"));
+        return;
+    }
+    if (fingerprint.trimmed().isEmpty()) {
+        emit error(QStringLiteral("终端特征码为空，无法注册"));
+        return;
+    }
+
+    setBusy(true);
+    QJsonObject obj;
+    obj["fingerprint"] = fingerprint.trimmed();
+    auto reply = nam_.post(makeRequest(QString("/classrooms/%1/register").arg(encodePathSegment(roomId))),
+                           QJsonDocument(obj).toJson(QJsonDocument::Compact));
     handleReply(reply, [=](const QJsonDocument &doc) {
         updateRegistrationFromJson(doc);
         emit operationFinished("register", QStringLiteral("教室已接入，注册完成"));
@@ -629,10 +695,25 @@ void RestClient::unregisterClassroom(const QString &roomId)
         return;
     }
     setBusy(true);
-    auto reply = nam_.post(makeRequest(QString("/classrooms/%1/unregister").arg(roomId)), QByteArray());
+    auto reply = nam_.post(makeRequest(QString("/classrooms/%1/unregister").arg(encodePathSegment(roomId))), QByteArray());
     handleReply(reply, [=](const QJsonDocument &doc) {
         updateRegistrationFromJson(doc);
         emit operationFinished("unregister", QStringLiteral("教室已取消接入"));
+    });
+}
+
+void RestClient::fetchBindingByFingerprint(const QString &fingerprint)
+{
+    const QString normalized = fingerprint.trimmed();
+    if (normalized.isEmpty()) {
+        emit error(QStringLiteral("终端特征码为空，无法校验"));
+        return;
+    }
+
+    const QString encoded = QString::fromUtf8(QUrl::toPercentEncoding(normalized));
+    auto reply = nam_.get(makeRequest(QString("/classroom-binding?fingerprint=%1").arg(encoded)));
+    handleReply(reply, [=](const QJsonDocument &doc) {
+        updateRegistrationFromJson(doc);
     });
 }
 
@@ -749,10 +830,18 @@ void RestClient::updateLockFromJson(const QJsonDocument &doc)
 void RestClient::updateRegistrationFromJson(const QJsonDocument &doc)
 {
     bool newRegistered = false;
+    QString newBoundRoomId;
     if (doc.isObject()) {
         const auto obj = doc.object();
         if (obj.contains("registered"))
             newRegistered = obj.value("registered").toBool(false);
+        if (newRegistered && obj.contains("room_id"))
+            newBoundRoomId = obj.value("room_id").toString().trimmed();
+    }
+
+    if (boundRoomId_ != newBoundRoomId) {
+        boundRoomId_ = newBoundRoomId;
+        emit boundRoomIdChanged();
     }
 
     if (newRegistered != registered_) {

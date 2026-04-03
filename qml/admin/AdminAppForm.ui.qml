@@ -25,6 +25,8 @@ Item {
     property int onlineDeviceCount: 0
     property int totalDeviceCount: 0
     property int alertCount: 0
+    property string devicePageMode: "rooms"
+    property string selectedRoomId: ""
     property var roomSummaryListModel
     property var alertPreviewModel
     property var alertListModel
@@ -39,13 +41,20 @@ Item {
     property alias manageAdminsButton: manageAdminsButton
     property alias changePasswordButton: changePasswordButton
     property alias viewAllAlertsButton: viewAllAlertsButton
-    property alias powerOnButton: powerOnButton
-    property alias powerOffButton: powerOffButton
-    property alias refreshDevicesButton: refreshDevicesButton
     property alias loginButton: loginButton
+    property alias logoutButton: logoutButton
     property alias userField: userField
     property alias passField: passField
+    property alias roomListView: roomListView
     property alias deviceListView: deviceListView
+
+    signal roomSelected(string roomId)
+    signal backToRoomsRequested()
+    signal refreshDevicePageRequested()
+    signal powerOnRequested()
+    signal powerOffRequested()
+    signal processAlertRequested(int alertId)
+    signal processAllAlertsRequested
 
     readonly property int sidebarWidth: 276
     readonly property int pageGap: Common.Theme.spaceL
@@ -53,9 +62,18 @@ Item {
     Rectangle {
         anchors.fill: parent
         gradient: Gradient {
-            GradientStop { position: 0.0; color: "#f7f9fc" }
-            GradientStop { position: 0.5; color: Common.Theme.pageBg }
-            GradientStop { position: 1.0; color: "#f8fafc" }
+            GradientStop {
+                position: 0.0
+                color: "#f7f9fc"
+            }
+            GradientStop {
+                position: 0.5
+                color: Common.Theme.pageBg
+            }
+            GradientStop {
+                position: 1.0
+                color: "#f8fafc"
+            }
         }
 
         Rectangle {
@@ -72,6 +90,8 @@ Item {
     RowLayout {
         anchors.fill: parent
         spacing: 0
+        visible: root.loggedIn
+        enabled: root.loggedIn
 
         Rectangle {
             Layout.preferredWidth: root.sidebarWidth
@@ -121,13 +141,6 @@ Item {
                                 font.pixelSize: 22
                                 font.bold: true
                             }
-
-                            Text {
-                                text: "Campus Control"
-                                color: Common.Theme.textSecondary
-                                font.family: Common.Theme.fontFamily
-                                font.pixelSize: 13
-                            }
                         }
                     }
                 }
@@ -137,12 +150,34 @@ Item {
                     width: parent.width
                     height: 80
                     checkable: true
+                    hoverEnabled: enabled
                     checked: root.navIndex === 0
+                    transformOrigin: Item.Center
+                    scale: overviewNavButton.enabled
+                           ? (overviewNavButton.down ? 0.985 : (overviewNavButton.hovered ? 1.01 : 1.0))
+                           : 1.0
+
+                    Behavior on scale {
+                        NumberAnimation { duration: 90; easing.type: Easing.OutCubic }
+                    }
+
                     background: Rectangle {
                         radius: 24
-                        color: overviewNavButton.checked ? Common.Theme.accent : "#fcfdff"
+                        color: overviewNavButton.checked
+                               ? (overviewNavButton.down ? "#1f4ea9" : (overviewNavButton.hovered ? "#255bc2" : Common.Theme.accent))
+                               : (overviewNavButton.down ? "#eef3fa" : (overviewNavButton.hovered ? "#f4f8ff" : "#fcfdff"))
                         border.width: 1
-                        border.color: overviewNavButton.checked ? Common.Theme.accent : Common.Theme.borderColor
+                        border.color: overviewNavButton.checked
+                                      ? (overviewNavButton.hovered ? "#5b87ea" : Common.Theme.accent)
+                                      : (overviewNavButton.hovered ? "#9fbaf0" : Common.Theme.borderColor)
+
+                        Behavior on color {
+                            ColorAnimation { duration: 120 }
+                        }
+
+                        Behavior on border.color {
+                            ColorAnimation { duration: 120 }
+                        }
                     }
                     contentItem: Row {
                         anchors.fill: parent
@@ -168,13 +203,17 @@ Item {
 
                         Text {
                             anchors.verticalCenter: parent.verticalCenter
-                            text: "总览"
+                            text: "系统总览"
                             color: overviewNavButton.checked ? "white" : Common.Theme.textPrimary
                             font.family: Common.Theme.fontFamily
                             font.pixelSize: 18
                             font.bold: true
                             elide: Text.ElideRight
                         }
+                    }
+
+                    HoverHandler {
+                        cursorShape: overviewNavButton.enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
                     }
                 }
 
@@ -183,12 +222,34 @@ Item {
                     width: parent.width
                     height: 80
                     checkable: true
+                    hoverEnabled: enabled
                     checked: root.navIndex === 1
+                    transformOrigin: Item.Center
+                    scale: deviceNavButton.enabled
+                           ? (deviceNavButton.down ? 0.985 : (deviceNavButton.hovered ? 1.01 : 1.0))
+                           : 1.0
+
+                    Behavior on scale {
+                        NumberAnimation { duration: 90; easing.type: Easing.OutCubic }
+                    }
+
                     background: Rectangle {
                         radius: 24
-                        color: deviceNavButton.checked ? Common.Theme.accent : "#fcfdff"
+                        color: deviceNavButton.checked
+                               ? (deviceNavButton.down ? "#1f4ea9" : (deviceNavButton.hovered ? "#255bc2" : Common.Theme.accent))
+                               : (deviceNavButton.down ? "#eef3fa" : (deviceNavButton.hovered ? "#f4f8ff" : "#fcfdff"))
                         border.width: 1
-                        border.color: deviceNavButton.checked ? Common.Theme.accent : Common.Theme.borderColor
+                        border.color: deviceNavButton.checked
+                                      ? (deviceNavButton.hovered ? "#5b87ea" : Common.Theme.accent)
+                                      : (deviceNavButton.hovered ? "#9fbaf0" : Common.Theme.borderColor)
+
+                        Behavior on color {
+                            ColorAnimation { duration: 120 }
+                        }
+
+                        Behavior on border.color {
+                            ColorAnimation { duration: 120 }
+                        }
                     }
                     contentItem: Row {
                         anchors.fill: parent
@@ -222,6 +283,10 @@ Item {
                             elide: Text.ElideRight
                         }
                     }
+
+                    HoverHandler {
+                        cursorShape: deviceNavButton.enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                    }
                 }
 
                 Button {
@@ -229,12 +294,34 @@ Item {
                     width: parent.width
                     height: 80
                     checkable: true
+                    hoverEnabled: enabled
                     checked: root.navIndex === 2
+                    transformOrigin: Item.Center
+                    scale: alertNavButton.enabled
+                           ? (alertNavButton.down ? 0.985 : (alertNavButton.hovered ? 1.01 : 1.0))
+                           : 1.0
+
+                    Behavior on scale {
+                        NumberAnimation { duration: 90; easing.type: Easing.OutCubic }
+                    }
+
                     background: Rectangle {
                         radius: 24
-                        color: alertNavButton.checked ? Common.Theme.accent : "#fcfdff"
+                        color: alertNavButton.checked
+                               ? (alertNavButton.down ? "#1f4ea9" : (alertNavButton.hovered ? "#255bc2" : Common.Theme.accent))
+                               : (alertNavButton.down ? "#eef3fa" : (alertNavButton.hovered ? "#f4f8ff" : "#fcfdff"))
                         border.width: 1
-                        border.color: alertNavButton.checked ? Common.Theme.accent : Common.Theme.borderColor
+                        border.color: alertNavButton.checked
+                                      ? (alertNavButton.hovered ? "#5b87ea" : Common.Theme.accent)
+                                      : (alertNavButton.hovered ? "#9fbaf0" : Common.Theme.borderColor)
+
+                        Behavior on color {
+                            ColorAnimation { duration: 120 }
+                        }
+
+                        Behavior on border.color {
+                            ColorAnimation { duration: 120 }
+                        }
                     }
                     contentItem: Row {
                         anchors.fill: parent
@@ -260,13 +347,17 @@ Item {
 
                         Text {
                             anchors.verticalCenter: parent.verticalCenter
-                            text: "告警中心"
+                            text: "警告/报修"
                             color: alertNavButton.checked ? "white" : Common.Theme.textPrimary
                             font.family: Common.Theme.fontFamily
                             font.pixelSize: 18
                             font.bold: true
                             elide: Text.ElideRight
                         }
+                    }
+
+                    HoverHandler {
+                        cursorShape: alertNavButton.enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
                     }
                 }
             }
@@ -292,6 +383,7 @@ Item {
 
                         RowLayout {
                             width: parent.width
+                            spacing: Common.Theme.spaceM
 
                             ColumnLayout {
                                 Layout.fillWidth: true
@@ -315,23 +407,37 @@ Item {
                                 }
                             }
 
-                            Common.StatusChip {
-                                text: root.locked ? "教室端已锁定" : "教室端可控"
-                                toneColor: root.locked ? Common.Theme.danger : Common.Theme.success
-                                fillColor: root.locked ? Common.Theme.dangerSoft : Common.Theme.successSoft
-                            }
+                            RowLayout {
+                                spacing: Common.Theme.spaceS
+                                Layout.alignment: Qt.AlignRight | Qt.AlignVCenter
 
-                            Common.StatusChip {
-                                visible: root.adminUsername !== ""
-                                text: root.isSuperAdmin ? ("超管 " + root.adminUsername) : ("管理员 " + root.adminUsername)
-                                toneColor: Common.Theme.accent
-                                fillColor: Common.Theme.accentSoft
+                                Common.StatusChip {
+                                    text: root.locked ? "教室端已锁定" : "教室端可控"
+                                    toneColor: root.locked ? Common.Theme.danger : Common.Theme.success
+                                    fillColor: root.locked ? Common.Theme.dangerSoft : Common.Theme.successSoft
+                                }
+
+                                Common.StatusChip {
+                                    visible: root.adminUsername !== ""
+                                    text: root.isSuperAdmin ? ("超管 ") : ("管理员 ")
+                                    toneColor: Common.Theme.accent
+                                    fillColor: Common.Theme.accentSoft
+                                }
+
+                                Common.ActionButton {
+                                    id: logoutButton
+                                    visible: root.loggedIn
+                                             && root.adminUsername !== ""
+                                    text: "退出登录"
+                                    variant: "secondary"
+                                    minWidth: 96
+                                }
                             }
                         }
 
                         RowLayout {
                             width: parent.width
-                            spacing: Common.Theme.spaceM
+                            spacing: Common.Theme.spaceS
 
                             Rectangle {
                                 Layout.fillWidth: true
@@ -400,61 +506,6 @@ Item {
                             width: parent.width
                             spacing: Common.Theme.spaceL
 
-                            Common.SurfaceCard {
-                                width: parent.width
-                                height: 176
-                                fillColor: Common.Theme.inkDark
-                                outlineColor: "#1d3454"
-
-                                Column {
-                                    anchors.fill: parent
-                                    spacing: Common.Theme.spaceM
-
-                                    Text {
-                                        text: "总控中心"
-                                        color: Common.Theme.inkDarkSoft
-                                        font.family: Common.Theme.fontFamily
-                                        font.pixelSize: 14
-                                    }
-
-                                    Text {
-                                        text: root.overviewHeadline
-                                        color: "white"
-                                        width: parent.width
-                                        wrapMode: Text.WordWrap
-                                        font.family: Common.Theme.fontFamily
-                                        font.pixelSize: 34
-                                        font.bold: true
-                                        maximumLineCount: 2
-                                        elide: Text.ElideRight
-                                    }
-
-                                    Text {
-                                        text: root.overviewFootnote
-                                        color: "#a8bbd5"
-                                        font.family: Common.Theme.fontFamily
-                                        font.pixelSize: 14
-                                        elide: Text.ElideRight
-                                    }
-
-                                    Row {
-                                        spacing: Common.Theme.spaceM
-
-                                        Common.StatusChip {
-                                            text: "活跃教室 " + root.activeRoomCount
-                                            toneColor: Common.Theme.success
-                                            fillColor: "#1f8f6a33"
-                                        }
-
-                                        Common.StatusChip {
-                                            text: "告警事件 " + root.alertCount
-                                            toneColor: Common.Theme.warning
-                                            fillColor: "#b7791f33"
-                                        }
-                                    }
-                                }
-                            }
-
                             Flow {
                                 width: parent.width
                                 spacing: Common.Theme.spaceL
@@ -488,7 +539,7 @@ Item {
 
                                 Common.MetricCard {
                                     width: overviewContent.width >= 1120 ? (overviewContent.width - Common.Theme.spaceL * 3) / 4 : (overviewContent.width - Common.Theme.spaceL) / 2
-                                    title: "待处理告警"
+                                    title: "待处理异常"
                                     value: String(root.alertCount)
                                     iconText: "警"
                                     toneColor: Common.Theme.danger
@@ -501,7 +552,9 @@ Item {
                                 spacing: Common.Theme.spaceL
 
                                 Common.SurfaceCard {
-                                    width: overviewContent.width >= 1200 ? (overviewContent.width - Common.Theme.spaceL) / 2 : overviewContent.width
+                                    width: overviewContent.width
+                                           >= 1200 ? (overviewContent.width - Common.Theme.spaceL)
+                                                     / 2 : overviewContent.width
                                     height: roomSection.implicitHeight + padding * 2
 
                                     Column {
@@ -552,7 +605,9 @@ Item {
                                                                 font.bold: true
                                                             }
 
-                                                            Item { Layout.fillWidth: true }
+                                                            Item {
+                                                                Layout.fillWidth: true
+                                                            }
 
                                                             Common.StatusChip {
                                                                 text: stateText
@@ -575,7 +630,8 @@ Item {
                                         }
 
                                         Text {
-                                            visible: !root.roomSummaryListModel || root.roomSummaryListModel.count === 0
+                                            visible: !root.roomSummaryListModel
+                                                     || root.roomSummaryListModel.count === 0
                                             text: "当前还没有已同步教室。"
                                             color: Common.Theme.textSecondary
                                             font.family: Common.Theme.fontFamily
@@ -585,7 +641,9 @@ Item {
                                 }
 
                                 Common.SurfaceCard {
-                                    width: overviewContent.width >= 1200 ? (overviewContent.width - Common.Theme.spaceL) / 2 : overviewContent.width
+                                    width: overviewContent.width
+                                           >= 1200 ? (overviewContent.width - Common.Theme.spaceL)
+                                                     / 2 : overviewContent.width
                                     height: alertSection.implicitHeight + padding * 2
 
                                     Column {
@@ -595,8 +653,8 @@ Item {
 
                                         Common.SectionHeader {
                                             width: parent.width
-                                            title: "告警速览"
-                                            subtitle: "集中查看最新故障、离线与报修"
+                                            title: "速览"
+                                            subtitle: "查看最新故障、离线与报修"
 
                                             Common.ActionButton {
                                                 id: viewAllAlertsButton
@@ -610,6 +668,7 @@ Item {
                                             model: root.alertPreviewModel
 
                                             delegate: Rectangle {
+                                                required property int alertId
                                                 required property string level
                                                 required property string roomId
                                                 required property string deviceId
@@ -621,7 +680,7 @@ Item {
                                                 border.width: 1
                                                 border.color: Common.Theme.borderColor
 
-                                                Row {
+                                                RowLayout {
                                                     anchors.fill: parent
                                                     anchors.margins: Common.Theme.spaceL
                                                     spacing: Common.Theme.spaceM
@@ -630,42 +689,56 @@ Item {
                                                         width: 10
                                                         height: 10
                                                         radius: 5
-                                                        color: Common.Theme.severityColor(level)
-                                                        anchors.verticalCenter: parent.verticalCenter
+                                                        color: Common.Theme.severityColor(
+                                                                   level)
+                                                        Layout.alignment: Qt.AlignVCenter
                                                     }
 
                                                     Common.StatusChip {
-                                                        anchors.verticalCenter: parent.verticalCenter
-                                                        text: Common.Theme.severityLabel(level)
-                                                        toneColor: Common.Theme.severityColor(level)
-                                                        fillColor: Common.Theme.severityFill(level)
+                                                        Layout.alignment: Qt.AlignVCenter
+                                                        text: Common.Theme.severityLabel(
+                                                                  level)
+                                                        toneColor: Common.Theme.severityColor(
+                                                                       level)
+                                                        fillColor: Common.Theme.severityFill(
+                                                                       level)
                                                     }
 
                                                     Text {
                                                         text: roomId + "/" + deviceId
                                                         color: Common.Theme.textPrimary
-                                                        anchors.verticalCenter: parent.verticalCenter
+                                                        Layout.alignment: Qt.AlignVCenter
                                                         font.family: Common.Theme.fontFamily
                                                         font.pixelSize: 13
                                                         font.bold: true
                                                     }
 
                                                     Text {
+                                                        Layout.fillWidth: true
                                                         text: message
                                                         color: Common.Theme.textSecondary
-                                                        anchors.verticalCenter: parent.verticalCenter
-                                                        width: parent.width - 330
+                                                        Layout.alignment: Qt.AlignVCenter
                                                         elide: Text.ElideRight
                                                         font.family: Common.Theme.fontFamily
                                                         font.pixelSize: 13
+                                                    }
+
+                                                    Common.ActionButton {
+                                                        text: "已处理"
+                                                        variant: "secondary"
+                                                        minWidth: 76
+                                                        maxWidth: 92
+                                                        onClicked: root.processAlertRequested(
+                                                                       alertId)
                                                     }
                                                 }
                                             }
                                         }
 
                                         Text {
-                                            visible: !root.alertPreviewModel || root.alertPreviewModel.count === 0
-                                            text: "当前没有新的异常告警。"
+                                            visible: !root.alertPreviewModel
+                                                     || root.alertPreviewModel.count === 0
+                                            text: "当前没有新的异常。"
                                             color: Common.Theme.textSecondary
                                             font.family: Common.Theme.fontFamily
                                             font.pixelSize: 13
@@ -681,80 +754,303 @@ Item {
                             anchors.fill: parent
                             spacing: Common.Theme.spaceL
 
-                            Common.SurfaceCard {
-                                Layout.fillWidth: true
-                                Layout.preferredHeight: deviceHeaderContent.implicitHeight + padding * 2
-
-                                Column {
-                                    id: deviceHeaderContent
-                                    width: parent.width
-                                    spacing: Common.Theme.spaceM
-
-                                    Common.SectionHeader {
-                                        width: parent.width
-                                        title: "设备控制面板"
-                                    }
-
-                                    RowLayout {
-                                        width: parent.width
-                                        spacing: Common.Theme.spaceM
-
-                                        Common.ActionButton {
-                                            id: powerOnButton
-                                            text: "开机"
-                                            enabled: root.hasSelectedDevice
-                                        }
-
-                                        Common.ActionButton {
-                                            id: powerOffButton
-                                            text: "关机"
-                                            enabled: root.hasSelectedDevice
-                                        }
-
-                                        Common.ActionButton {
-                                            id: refreshDevicesButton
-                                            text: "刷新设备"
-                                            variant: "secondary"
-                                        }
-
-                                        Item { Layout.fillWidth: true }
-
-                                        Text {
-                                            text: root.statusText
-                                            color: Common.Theme.textSecondary
-                                            font.family: Common.Theme.fontFamily
-                                            font.pixelSize: 13
-                                            elide: Text.ElideRight
-                                        }
-                                    }
-                                }
-                            }
-
-                            Common.SurfaceCard {
+                            StackLayout {
                                 Layout.fillWidth: true
                                 Layout.fillHeight: true
-                                padding: Common.Theme.spaceL
+                                currentIndex: root.devicePageMode === "roomDevices" ? 1 : 0
 
-                                ColumnLayout {
-                                    anchors.fill: parent
-                                    spacing: Common.Theme.spaceM
+                                Item {
+                                    ColumnLayout {
+                                        anchors.fill: parent
+                                        spacing: Common.Theme.spaceL
 
-                                    Text {
-                                        text: "设备列表"
-                                        color: Common.Theme.textPrimary
-                                        font.family: Common.Theme.fontFamily
-                                        font.pixelSize: 20
-                                        font.bold: true
+                                        Common.SurfaceCard {
+                                            Layout.fillWidth: true
+                                            Layout.preferredHeight: roomHeaderContent.implicitHeight
+                                                                    + padding * 2
+
+                                            ColumnLayout {
+                                                id: roomHeaderContent
+                                                anchors.fill: parent
+                                                anchors.margins: parent.padding
+                                                spacing: Common.Theme.spaceM
+
+                                                Common.SectionHeader {
+                                                    Layout.fillWidth: true
+                                                    title: "教室列表"
+                                                    subtitle: "选择教室查看该教室内的全部设备"
+
+                                                    Common.ActionButton {
+                                                        text: "刷新设备"
+                                                        variant: "secondary"
+                                                        onClicked: root.refreshDevicePageRequested()
+                                                    }
+                                                }
+
+                                                Text {
+                                                    Layout.fillWidth: true
+                                                    text: root.statusText
+                                                    color: Common.Theme.textSecondary
+                                                    font.family: Common.Theme.fontFamily
+                                                    font.pixelSize: 13
+                                                    elide: Text.ElideRight
+                                                }
+                                            }
+                                        }
+
+                                        Common.SurfaceCard {
+                                            Layout.fillWidth: true
+                                            Layout.fillHeight: true
+                                            padding: Common.Theme.spaceL
+
+                                            Item {
+                                                anchors.fill: parent
+
+                                                ListView {
+                                                    id: roomListView
+                                                    anchors.fill: parent
+                                                    clip: true
+                                                    spacing: Common.Theme.spaceM
+                                                    model: root.roomSummaryListModel
+
+                                                    delegate: Rectangle {
+                                                        required property string roomId
+                                                        required property string stateText
+                                                        required property color stateColor
+                                                        required property color stateFill
+                                                        required property string detail
+                                                        property bool hovered: roomHover.hovered
+                                                        property bool pressed: roomTap.pressed
+                                                        width: ListView.view.width
+                                                        height: roomCardContent.implicitHeight + Common.Theme.spaceL * 2
+                                                        radius: Common.Theme.radiusL
+                                                        color: root.selectedRoomId === roomId
+                                                            ? (pressed ? "#e4edff" : (hovered ? "#edf4ff" : "#f3f7ff"))
+                                                            : (pressed ? "#eef3fa" : (hovered ? "#f7faff" : "#fcfdff"))
+                                                        border.width: 1
+                                                        border.color: root.selectedRoomId === roomId
+                                                            ? "#bdd0f4"
+                                                            : (hovered ? "#d4e0f1" : Common.Theme.borderColor)
+                                                        scale: pressed ? 0.992 : (hovered ? 1.006 : 1.0)
+
+                                                        Behavior on color {
+                                                            ColorAnimation { duration: 120 }
+                                                        }
+
+                                                        Behavior on border.color {
+                                                            ColorAnimation { duration: 120 }
+                                                        }
+
+                                                        Behavior on scale {
+                                                            NumberAnimation { duration: 90; easing.type: Easing.OutCubic }
+                                                        }
+
+                                                        ColumnLayout {
+                                                            id: roomCardContent
+                                                            anchors.fill: parent
+                                                            anchors.margins: Common.Theme.spaceL
+                                                            spacing: Common.Theme.spaceS
+
+                                                            RowLayout {
+                                                                Layout.fillWidth: true
+                                                                spacing: Common.Theme.spaceM
+
+                                                                Text {
+                                                                    text: roomId
+                                                                    color: Common.Theme.textPrimary
+                                                                    font.family: Common.Theme.fontFamily
+                                                                    font.pixelSize: 22
+                                                                    font.bold: true
+                                                                }
+
+                                                                Common.StatusChip {
+                                                                    text: stateText
+                                                                    toneColor: stateColor
+                                                                    fillColor: stateFill
+                                                                }
+
+                                                                Item { Layout.fillWidth: true }
+
+                                                                Common.ActionButton {
+                                                                    text: "进入"
+                                                                    variant: "secondary"
+                                                                    minWidth: 88
+                                                                    onClicked: root.roomSelected(roomId)
+                                                                }
+                                                            }
+
+                                                            Text {
+                                                                Layout.fillWidth: true
+                                                                text: detail
+                                                                color: Common.Theme.textSecondary
+                                                                font.family: Common.Theme.fontFamily
+                                                                font.pixelSize: 13
+                                                                wrapMode: Text.WordWrap
+                                                                maximumLineCount: 2
+                                                                elide: Text.ElideRight
+                                                            }
+                                                        }
+
+                                                        HoverHandler {
+                                                            id: roomHover
+                                                            cursorShape: Qt.PointingHandCursor
+                                                        }
+
+                                                        TapHandler {
+                                                            id: roomTap
+                                                            onTapped: root.roomSelected(roomId)
+                                                        }
+                                                    }
+                                                }
+
+                                                Text {
+                                                    anchors.centerIn: parent
+                                                    visible: !root.roomSummaryListModel || root.roomSummaryListModel.count === 0
+                                                    text: "当前还没有可查看的教室。"
+                                                    color: Common.Theme.textSecondary
+                                                    font.family: Common.Theme.fontFamily
+                                                    font.pixelSize: 13
+                                                }
+                                            }
+                                        }
                                     }
+                                }
 
-                                    ListView {
-                                        id: deviceListView
-                                        Layout.fillWidth: true
-                                        Layout.fillHeight: true
-                                        clip: true
-                                        spacing: Common.Theme.spaceM
-                                        model: root.deviceListModel
-                                        delegate: root.deviceListDelegate
+                                Item {
+                                    ColumnLayout {
+                                        anchors.fill: parent
+                                        spacing: Common.Theme.spaceL
+
+                                        Common.SurfaceCard {
+                                            Layout.fillWidth: true
+                                            Layout.preferredHeight: roomDevicesHeaderContent.implicitHeight
+                                                                    + padding * 2
+
+                                            ColumnLayout {
+                                                id: roomDevicesHeaderContent
+                                                anchors.fill: parent
+                                                anchors.margins: parent.padding
+                                                spacing: Common.Theme.spaceM
+
+                                                RowLayout {
+                                                    Layout.fillWidth: true
+                                                    spacing: Common.Theme.spaceM
+
+                                                    Common.ActionButton {
+                                                        text: "返回教室列表"
+                                                        variant: "secondary"
+                                                        minWidth: 126
+                                                        onClicked: root.backToRoomsRequested()
+                                                    }
+
+                                                    ColumnLayout {
+                                                        Layout.fillWidth: true
+                                                        spacing: 4
+
+                                                        Text {
+                                                            Layout.fillWidth: true
+                                                            text: root.selectedRoomId !== ""
+                                                                  ? ("当前教室：" + root.selectedRoomId)
+                                                                  : "当前教室"
+                                                            color: Common.Theme.textPrimary
+                                                            font.family: Common.Theme.fontFamily
+                                                            font.pixelSize: 24
+                                                            font.bold: true
+                                                            elide: Text.ElideRight
+                                                        }
+
+                                                        Text {
+                                                            Layout.fillWidth: true
+                                                            text: "查看并控制当前教室内的全部设备"
+                                                            color: Common.Theme.textSecondary
+                                                            font.family: Common.Theme.fontFamily
+                                                            font.pixelSize: 13
+                                                            elide: Text.ElideRight
+                                                        }
+                                                    }
+                                                }
+
+                                                RowLayout {
+                                                    Layout.fillWidth: true
+                                                    spacing: Common.Theme.spaceS
+
+                                                    Common.ActionButton {
+                                                        text: "开机"
+                                                        enabled: root.hasSelectedDevice
+                                                        onClicked: root.powerOnRequested()
+                                                    }
+
+                                                    Common.ActionButton {
+                                                        text: "关机"
+                                                        enabled: root.hasSelectedDevice
+                                                        onClicked: root.powerOffRequested()
+                                                    }
+
+                                                    Common.ActionButton {
+                                                        text: "刷新设备"
+                                                        variant: "secondary"
+                                                        onClicked: root.refreshDevicePageRequested()
+                                                    }
+
+                                                    Item { Layout.fillWidth: true }
+                                                }
+
+                                                Text {
+                                                    Layout.fillWidth: true
+                                                    text: root.statusText
+                                                    color: Common.Theme.textSecondary
+                                                    font.family: Common.Theme.fontFamily
+                                                    font.pixelSize: 13
+                                                    elide: Text.ElideRight
+                                                }
+                                            }
+                                        }
+
+                                        Common.SurfaceCard {
+                                            Layout.fillWidth: true
+                                            Layout.fillHeight: true
+                                            padding: Common.Theme.spaceL
+
+                                            Item {
+                                                anchors.fill: parent
+
+                                                ColumnLayout {
+                                                    anchors.fill: parent
+                                                    spacing: Common.Theme.spaceM
+
+                                                    Text {
+                                                        text: "设备列表"
+                                                        color: Common.Theme.textPrimary
+                                                        font.family: Common.Theme.fontFamily
+                                                        font.pixelSize: 20
+                                                        font.bold: true
+                                                    }
+
+                                                    Item {
+                                                        Layout.fillWidth: true
+                                                        Layout.fillHeight: true
+
+                                                        ListView {
+                                                            id: deviceListView
+                                                            anchors.fill: parent
+                                                            clip: true
+                                                            spacing: Common.Theme.spaceM
+                                                            model: root.deviceListModel
+                                                            delegate: root.deviceListDelegate
+                                                        }
+
+                                                        Text {
+                                                            anchors.centerIn: parent
+                                                            visible: !root.deviceListModel || root.deviceListModel.count === 0
+                                                            text: "当前教室暂无设备。"
+                                                            color: Common.Theme.textSecondary
+                                                            font.family: Common.Theme.fontFamily
+                                                            font.pixelSize: 13
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -768,7 +1064,8 @@ Item {
 
                             Common.SurfaceCard {
                                 Layout.fillWidth: true
-                                Layout.preferredHeight: alertHeaderContent.implicitHeight + padding * 2
+                                Layout.preferredHeight: alertHeaderContent.implicitHeight
+                                                        + padding * 2
 
                                 Column {
                                     id: alertHeaderContent
@@ -777,11 +1074,18 @@ Item {
 
                                     Common.SectionHeader {
                                         width: parent.width
-                                        title: "告警中心"
+                                        title: "警告/报修"
+
+                                        Common.ActionButton {
+                                            text: "全部处理"
+                                            variant: "secondary"
+                                            minWidth: 108
+                                            onClicked: root.processAllAlertsRequested()
+                                        }
                                     }
 
                                     Text {
-                                        text: "当前共 " + root.alertCount + " 条告警记录"
+                                        text: "当前共 " + root.alertCount + " 条异常记录"
                                         color: Common.Theme.textSecondary
                                         font.family: Common.Theme.fontFamily
                                         font.pixelSize: 13
@@ -801,6 +1105,7 @@ Item {
                                     model: root.alertListModel
 
                                     delegate: Rectangle {
+                                        required property int alertId
                                         required property string level
                                         required property string roomId
                                         required property string deviceId
@@ -823,9 +1128,12 @@ Item {
                                                 spacing: Common.Theme.spaceM
 
                                                 Common.StatusChip {
-                                                    text: Common.Theme.severityLabel(level)
-                                                    toneColor: Common.Theme.severityColor(level)
-                                                    fillColor: Common.Theme.severityFill(level)
+                                                    text: Common.Theme.severityLabel(
+                                                              level)
+                                                    toneColor: Common.Theme.severityColor(
+                                                                   level)
+                                                    fillColor: Common.Theme.severityFill(
+                                                                   level)
                                                 }
 
                                                 Text {
@@ -836,13 +1144,24 @@ Item {
                                                     font.bold: true
                                                 }
 
-                                                Item { Layout.fillWidth: true }
+                                                Item {
+                                                    Layout.fillWidth: true
+                                                }
 
                                                 Text {
                                                     text: createdAt
                                                     color: Common.Theme.textSecondary
                                                     font.family: Common.Theme.fontFamily
                                                     font.pixelSize: 12
+                                                }
+
+                                                Common.ActionButton {
+                                                    text: "已处理"
+                                                    variant: "secondary"
+                                                    minWidth: 76
+                                                    maxWidth: 92
+                                                    onClicked: root.processAlertRequested(
+                                                                   alertId)
                                                 }
                                             }
 
@@ -867,15 +1186,14 @@ Item {
         }
     }
 
-    Rectangle {
+    Item {
         anchors.fill: parent
         visible: !root.loggedIn
-        color: "#7a101a2b"
         z: 20
 
         Common.SurfaceCard {
             id: loginCard
-            width: Math.min(420, root.width - Common.Theme.spaceXL * 2)
+            width: Math.min(440, root.width - Common.Theme.spaceXL * 2)
             height: Math.min(loginContent.implicitHeight + padding * 2,
                              root.height - Common.Theme.spaceXL * 2)
             anchors.centerIn: parent
@@ -917,31 +1235,68 @@ Item {
                         font.bold: true
                     }
 
-                    Text {
-                        text: "登录后进入管理后台，账户由超级管理员统一维护"
-                        color: Common.Theme.textSecondary
-                        width: parent.width
-                        wrapMode: Text.WordWrap
-                        font.family: Common.Theme.fontFamily
-                        font.pixelSize: 13
-                    }
-
                     TextField {
                         id: userField
                         width: parent.width
+                        height: 54
                         placeholderText: "用户名"
                         text: ""
+                        color: Common.Theme.textPrimary
+                        font.family: Common.Theme.fontFamily
+                        font.pixelSize: 15
+                        leftPadding: 16
+                        rightPadding: 16
+                        topPadding: 14
+                        bottomPadding: 14
+                        selectByMouse: true
+
+                        background: Rectangle {
+                            radius: Common.Theme.radiusM
+                            color: "#f7faff"
+                            border.width: 1
+                            border.color: userField.activeFocus ? Common.Theme.accent : "#cfd8e6"
+                        }
                     }
 
                     TextField {
                         id: passField
                         width: parent.width
+                        height: 54
                         placeholderText: "密码"
                         echoMode: TextInput.Password
                         text: ""
+                        color: Common.Theme.textPrimary
+                        font.family: Common.Theme.fontFamily
+                        font.pixelSize: 15
+                        leftPadding: 16
+                        rightPadding: 16
+                        topPadding: 14
+                        bottomPadding: 14
+                        selectByMouse: true
+
+                        background: Rectangle {
+                            radius: Common.Theme.radiusM
+                            color: "#f7faff"
+                            border.width: 1
+                            border.color: passField.activeFocus ? Common.Theme.accent : "#cfd8e6"
+                        }
                     }
 
-                    Item { width: 1; height: 8 }
+                    Text {
+                        visible: root.statusText !== ""
+                                 && root.statusText !== "系统待命"
+                        width: parent.width
+                        text: root.statusText
+                        color: Common.Theme.textSecondary
+                        wrapMode: Text.WordWrap
+                        font.family: Common.Theme.fontFamily
+                        font.pixelSize: 13
+                    }
+
+                    Item {
+                        width: 1
+                        height: 8
+                    }
 
                     Common.ActionButton {
                         id: loginButton
@@ -957,7 +1312,7 @@ Item {
         anchors.fill: parent
         visible: root.busy
         color: "#3e0d1625"
-        z: 19
+        z: 30
 
         Column {
             anchors.centerIn: parent

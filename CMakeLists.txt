@@ -66,12 +66,13 @@ target_link_libraries(sim_classroom_qml PRIVATE sim_common qml_shared Qt6::Quick
 
 add_executable(sim_backend
     src/backend/backend_server.cpp
+    src/backend/backend_auth.cpp
+    src/backend/command_service.cpp
     src/backend/db_store.cpp
+    src/backend/http_routes.cpp
+    src/backend/sse_hub.cpp
 )
 target_link_libraries(sim_backend PRIVATE mqtt_bridge Qt6::Core Qt6::Sql Qt6::Network Qt6::Concurrent)
-target_include_directories(sim_backend PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
-
-
-
+target_include_directories(sim_backend PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party ${SRC_ROOT}/backend)
 
 

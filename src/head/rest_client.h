@@ -22,6 +22,7 @@ class RestClient : public QObject
     Q_PROPERTY(bool busy READ busy NOTIFY busyChanged)
     Q_PROPERTY(bool registered READ registered NOTIFY registrationChanged)
     Q_PROPERTY(bool registrationChecked READ registrationChecked NOTIFY registrationCheckedChanged)
+    Q_PROPERTY(QString boundRoomId READ boundRoomId NOTIFY boundRoomIdChanged)
     Q_PROPERTY(QString adminUsername READ adminUsername NOTIFY adminUsernameChanged)
     Q_PROPERTY(bool superAdmin READ superAdmin NOTIFY superAdminChanged)
     Q_PROPERTY(bool canManageAdmins READ canManageAdmins NOTIFY canManageAdminsChanged)
@@ -35,6 +36,7 @@ public:
     bool busy() const { return busy_; }
     bool registered() const { return registered_; }
     bool registrationChecked() const { return registrationChecked_; }
+    QString boundRoomId() const { return boundRoomId_; }
     QString adminUsername() const { return adminUsername_; }
     bool superAdmin() const { return superAdmin_; }
     bool canManageAdmins() const { return canManageAdmins_; }
@@ -49,14 +51,17 @@ public:
     Q_INVOKABLE void fetchDevices();
     Q_INVOKABLE void fetchDevicesByRoom(const QString &roomId);
     Q_INVOKABLE void fetchAlerts();
+    Q_INVOKABLE void resolveAlert(int alertId);
+    Q_INVOKABLE void resolveAllAlerts();
     Q_INVOKABLE void fetchLock();
     Q_INVOKABLE void sendCommand(const QString &roomId, const QString &deviceId, const QString &action);
     Q_INVOKABLE void submitReport(const QString &roomId, const QString &deviceId, const QString &message);
     Q_INVOKABLE void setLock(bool locked);
-    Q_INVOKABLE void sendHeartbeat(const QString &roomId);
     Q_INVOKABLE void fetchRegistration(const QString &roomId);
     Q_INVOKABLE void registerClassroom(const QString &roomId);
+    Q_INVOKABLE void registerClassroomWithFingerprint(const QString &roomId, const QString &fingerprint);
     Q_INVOKABLE void unregisterClassroom(const QString &roomId);
+    Q_INVOKABLE void fetchBindingByFingerprint(const QString &fingerprint);
     Q_INVOKABLE void fetchAdminUsers();
     Q_INVOKABLE void createAdminUser(const QString &username, const QString &password);
     Q_INVOKABLE void deleteAdminUser(const QString &username);
@@ -81,6 +86,7 @@ signals:
     void canChangePasswordChanged();
     void registrationChanged(bool registered);
     void registrationCheckedChanged(bool checked);
+    void boundRoomIdChanged();
     void operationFinished(const QString &action, const QString &message);
     void error(const QString &message);
     void adminUsersReceived(const QVariantList &admins);
@@ -102,6 +108,7 @@ private:
     bool busy_ = false;
     bool registered_ = false;
     bool registrationChecked_ = false;
+    QString boundRoomId_;
     QString adminUsername_;
     bool superAdmin_ = false;
     bool canManageAdmins_ = false;

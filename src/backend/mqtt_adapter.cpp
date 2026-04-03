@@ -1,10 +1,11 @@
 #include "mqtt_adapter.h"
+#include "class_init.h"
 #include "topic_defs.h"
 
 #include <QDateTime>
+#include <QDebug>
 #include <QJsonDocument>
 #include <QJsonObject>
-#include <QMetaObject>
 #include <QMutexLocker>
 
 /*
@@ -12,6 +13,59 @@
  * 上层只需要知道“连上了没有”“能不能发命令”“收到了什么状态”，
  * 而不需要关心具体的回调、主题格式和线程切换。
  */
+
+namespace {
+
+bool commandTraceEnabled()
+{
+    static const bool enabled = qEnvironmentVariableIsSet("SIM_COMMAND_TRACE")
+        && qEnvironmentVariable("SIM_COMMAND_TRACE").trimmed().compare("false", Qt::CaseInsensitive) != 0
+        && qEnvironmentVariable("SIM_COMMAND_TRACE").trimmed() != "0";
+    return enabled;
+}
+
+QString traceValue(QString value)
+{
+    value = value.trimmed();
+    if (value.isEmpty())
+        return QStringLiteral("-");
+    value.replace('\\', '/');
+    value.replace('\n', '_');
+    value.replace('\r', '_');
+    value.replace('\t', '_');
+    value.replace(' ', '_');
+    return value;
+}
+
+void logMqttTrace(const QString &phase,
+                  const QString &result,
+                  const QString &topic,
+                  const QString &roomId,
+                  const QString &deviceId,
+                  const QJsonObject &payload,
+                  const QString &statusOrLevel,
+                  const QString &detail)
+{
+    if (!commandTraceEnabled())
+        return;
+
+    const QString line = QStringLiteral(
+                             "cmd_trace ts=%1 source=backend phase=%2 result=%3 topic=%4 room=%5 device=%6 command_id=%7 epoch=%8 version=%9 status=%10 detail=%11")
+                             .arg(traceValue(ClassInit::currentShanghaiIsoString()),
+                                  traceValue(phase),
+                                  traceValue(result),
+                                  traceValue(topic),
+                                  traceValue(roomId),
+                                  traceValue(deviceId),
+                                  traceValue(payload.value("applied_command_id").toString()),
+                                  traceValue(payload.value("applied_command_epoch").toVariant().toString()),
+                                  traceValue(payload.value("applied_device_command_version").toVariant().toString()),
+                                  traceValue(statusOrLevel),
+                                  traceValue(detail));
+    qInfo().noquote() << line;
+}
+
+} // namespace
 
 MqttAdapter::MqttAdapter(const QString &brokerUrl, QObject *parent)
     : QObject(parent),
@@ -23,7 +77,6 @@ MqttAdapter::MqttAdapter(const QString &brokerUrl, QObject *parent)
     connOpts_.set_clean_session(false);
     connOpts_.set_automatic_reconnect(true);
 
-    // MQTT 回调会在别的线程触发，因此这里改用 Qt 的队列连接方式切回对象线程。
     client_.set_message_callback([this](mqtt::const_message_ptr msg) {
         const QString topic = QString::fromStdString(msg->get_topic());
         const auto payload = QByteArray::fromStdString(msg->to_string());
@@ -33,15 +86,28 @@ MqttAdapter::MqttAdapter(const QString &brokerUrl, QObject *parent)
             const QString deviceId = parts[3];
             QString status = "unknown";
             QString name;
+            QJsonObject obj;
             const auto doc = QJsonDocument::fromJson(payload);
             if (doc.isObject()) {
-                const auto obj = doc.object();
+                obj = doc.object();
                 status = obj.value("status").toString(status);
                 name = obj.value("name").toString();
             }
-            QMetaObject::invokeMethod(this, [this, roomId, deviceId, name, status]() {
-                emit stateSignal(roomId, deviceId, name, status);
-            }, Qt::QueuedConnection);
+            logMqttTrace(QStringLiteral("mqtt_state_rx"),
+                         QStringLiteral("received"),
+                         topic,
+                         roomId,
+                         deviceId,
+                         obj,
+                         status,
+                         QStringLiteral("name=%1").arg(traceValue(name)));
+            StateHandler handler;
+            {
+                QMutexLocker locker(&handlerMutex_);
+                handler = stateHandler_;
+            }
+            if (handler)
+                handler(roomId, deviceId, name, status, obj);
         } else if (topic.contains("/alert/") && parts.size() >= 4) {
             const QString roomId = parts[1];
             const QString deviceId = parts[3];
@@ -52,12 +118,31 @@ MqttAdapter::MqttAdapter(const QString &brokerUrl, QObject *parent)
                 const auto obj = doc.object();
                 msgText = obj.value("message").toString(msgText);
                 level = obj.value("level").toString(level);
+                logMqttTrace(QStringLiteral("mqtt_alert_rx"),
+                             QStringLiteral("received"),
+                             topic,
+                             roomId,
+                             deviceId,
+                             obj,
+                             level,
+                             QStringLiteral("message=%1").arg(traceValue(msgText)));
+            } else {
+                logMqttTrace(QStringLiteral("mqtt_alert_rx"),
+                             QStringLiteral("received"),
+                             topic,
+                             roomId,
+                             deviceId,
+                             QJsonObject{},
+                             level,
+                             QStringLiteral("message=%1").arg(traceValue(msgText)));
             }
-            QMetaObject::invokeMethod(this,
-                                      [this, roomId, deviceId, msgText, level]() {
-                                          emit alertSignal(roomId, deviceId, msgText, level);
-                                      },
-                                      Qt::QueuedConnection);
+            AlertHandler handler;
+            {
+                QMutexLocker locker(&handlerMutex_);
+                handler = alertHandler_;
+            }
+            if (handler)
+                handler(roomId, deviceId, msgText, level);
         }
     });
 
@@ -65,6 +150,18 @@ MqttAdapter::MqttAdapter(const QString &brokerUrl, QObject *parent)
     client_.set_connection_lost_handler([this](const std::string &cause) {
         qWarning("MQTT connection lost: %s", cause.c_str());
     });
+}
+
+void MqttAdapter::setStateHandler(StateHandler handler)
+{
+    QMutexLocker locker(&handlerMutex_);
+    stateHandler_ = std::move(handler);
+}
+
+void MqttAdapter::setAlertHandler(AlertHandler handler)
+{
+    QMutexLocker locker(&handlerMutex_);
+    alertHandler_ = std::move(handler);
 }
 
 // 建立与 broker 的连接，并订阅需要监听的主题。
@@ -105,18 +202,14 @@ bool MqttAdapter::subscribeTopics()
 }
 
 // 发布控制命令，供后端转发给仿真端或真实设备端。
-bool MqttAdapter::publishCommand(const QString &roomId, const QString &deviceId, const QString &action)
+bool MqttAdapter::publishCommand(const QString &roomId, const QString &deviceId, const QJsonObject &payload)
 {
     if (!ensureConnected())
         return false;
-
-    QJsonObject obj;
-    obj["action"] = action;
-    obj["timestamp"] = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
     const auto topic = Topics::commandTopic(roomId, deviceId);
     try {
         auto msg = mqtt::make_message(topic.toStdString(),
-                                      QJsonDocument(obj).toJson(QJsonDocument::Compact).toStdString());
+                                      QJsonDocument(payload).toJson(QJsonDocument::Compact).toStdString());
         msg->set_qos(1);
         client_.publish(msg);
         return true;
@@ -136,7 +229,7 @@ bool MqttAdapter::publishReport(const QString &roomId, const QString &deviceId, 
     obj["device_id"] = deviceId;
     obj["message"] = message;
     obj["level"] = "repair";
-    obj["timestamp"] = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
+    obj["timestamp"] = ClassInit::currentShanghaiIsoString();
     const auto topic = Topics::alertTopic(roomId, deviceId);
     try {
         auto msg = mqtt::make_message(
@@ -147,28 +240,6 @@ bool MqttAdapter::publishReport(const QString &roomId, const QString &deviceId, 
         return true;
     } catch (const mqtt::exception &e) {
         qWarning("MQTT publish report failed: %s", e.what());
-        return false;
-    }
-}
-
-// 发布教室心跳，让后端知道这个教室仍然在线。
-bool MqttAdapter::publishHeartbeat(const QString &roomId)
-{
-    if (!ensureConnected())
-        return false;
-
-    QJsonObject obj;
-    obj["timestamp"] = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
-    const auto topic = Topics::heartbeatTopic(roomId);
-    try {
-        auto msg = mqtt::make_message(
-            topic.toStdString(),
-            QJsonDocument(obj).toJson(QJsonDocument::Compact).toStdString());
-        msg->set_qos(1);
-        client_.publish(msg);
-        return true;
-    } catch (const mqtt::exception &e) {
-        qWarning("MQTT heartbeat publish failed: %s", e.what());
         return false;
     }
 }

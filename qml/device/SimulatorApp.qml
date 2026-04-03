@@ -105,11 +105,6 @@ ApplicationWindow {
             }
 
             Button {
-                text: sim.heartbeatPaused ? "恢复心跳" : "停止心跳"
-                onClicked: sim.toggleHeartbeat()
-            }
-
-            Button {
                 text: sim.randomDelayEnabled ? "关闭随机延迟" : "开启随机延迟"
                 onClicked: sim.toggleRandomDelay()
             }

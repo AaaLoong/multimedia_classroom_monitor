@@ -10,10 +10,12 @@ Item {
     property bool busy: false
     property bool bulkControlLocked: false
     property bool registered: false
+    property bool bindingChecking: false
     property bool backendReady: false
     property string roomId: ""
     property string headerTitle: "教室接入控制台"
     property string inputRoomId: ""
+    property string manualRoomText: ""
     property string statusText: ""
     property int deviceCount: 0
     property int onlineCount: 0
@@ -31,12 +33,16 @@ Item {
     property alias refreshButton: refreshButton
     property alias powerOnAllButton: powerOnAllButton
     property alias powerOffAllButton: powerOffAllButton
-    property alias heartbeatButton: heartbeatButton
     property alias buildingCombo: buildingCombo
     property alias floorCombo: floorCombo
     property alias suffixCombo: suffixCombo
-    property alias checkStatusButton: checkStatusButton
+    property alias manualRoomField: manualRoomField
     property alias registerButton: registerButton
+
+    onManualRoomTextChanged: {
+        if (!manualRoomField.activeFocus && manualRoomField.text !== manualRoomText)
+            manualRoomField.text = manualRoomText
+    }
 
     Rectangle {
         anchors.fill: parent
@@ -216,13 +222,6 @@ Item {
                                 text: "一键下课"
                                 enabled: !root.locked && !root.bulkControlLocked && root.registered && root.deviceCount > 0
                             }
-
-                            Common.ActionButton {
-                                id: heartbeatButton
-                                text: "同步心跳"
-                                variant: "secondary"
-                                enabled: root.registered
-                            }
                         }
                     }
                 }
@@ -250,13 +249,6 @@ Item {
                             delegate: root.deviceDelegate
                         }
 
-                        Text {
-                            visible: !root.deviceListModel || root.deviceListModel.rowCount() === 0
-                            text: "当前没有已同步设备。"
-                            color: Common.Theme.textSecondary
-                            font.family: Common.Theme.fontFamily
-                            font.pixelSize: 13
-                        }
                     }
                 }
             }
@@ -290,13 +282,59 @@ Item {
 
     Rectangle {
         anchors.fill: parent
-        visible: !root.registered
+        visible: root.bindingChecking
         color: "#cc000000"
         z: 12
 
         Common.SurfaceCard {
-            width: 460
-            height: 272
+            width: 420
+            height: 200
+            anchors.centerIn: parent
+
+            Column {
+                anchors.centerIn: parent
+                width: parent.width - Common.Theme.spaceXL * 2
+                spacing: Common.Theme.spaceM
+
+                BusyIndicator {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    running: root.bindingChecking
+                    width: 48
+                    height: 48
+                }
+
+                Text {
+                    width: parent.width
+                    text: "正在验证终端身份..."
+                    horizontalAlignment: Text.AlignHCenter
+                    color: Common.Theme.textPrimary
+                    font.family: Common.Theme.fontFamily
+                    font.pixelSize: 24
+                    font.bold: true
+                }
+
+                Text {
+                    width: parent.width
+                    text: "系统正在读取当前终端绑定的教室信息"
+                    wrapMode: Text.WordWrap
+                    horizontalAlignment: Text.AlignHCenter
+                    color: Common.Theme.textSecondary
+                    font.family: Common.Theme.fontFamily
+                    font.pixelSize: 13
+                }
+            }
+        }
+    }
+
+    Rectangle {
+        anchors.fill: parent
+        visible: !root.registered && !root.bindingChecking
+        color: "#cc000000"
+        z: 12
+
+        Common.SurfaceCard {
+            width: 520
+            height: 360
             anchors.centerIn: parent
 
             ColumnLayout {
@@ -312,7 +350,7 @@ Item {
                 }
 
                 Text {
-                    text: "请选择教室号并完成接入注册"
+                    text: "请选择或输入教室号并完成接入注册"
                     color: Common.Theme.textSecondary
                     font.family: Common.Theme.fontFamily
                     font.pixelSize: 13
@@ -325,22 +363,254 @@ Item {
                     ComboBox {
                         id: buildingCombo
                         Layout.fillWidth: true
+                        Layout.preferredHeight: 54
                         model: root.buildingOptions
                         currentIndex: root.buildingIndex
+                        leftPadding: 16
+                        rightPadding: 40
+                        topPadding: 14
+                        bottomPadding: 14
+
+                        contentItem: Text {
+                            text: buildingCombo.displayText
+                            color: Common.Theme.textPrimary
+                            font.family: Common.Theme.fontFamily
+                            font.pixelSize: 15
+                            verticalAlignment: Text.AlignVCenter
+                            elide: Text.ElideRight
+                        }
+
+                        background: Rectangle {
+                            radius: Common.Theme.radiusM
+                            color: "#f7faff"
+                            border.width: 1
+                            border.color: buildingCombo.activeFocus ? Common.Theme.accent : "#cfd8e6"
+                        }
+
+                        indicator: Text {
+                            anchors.right: parent.right
+                            anchors.rightMargin: 14
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: "⌄"
+                            color: Common.Theme.textSecondary
+                            font.family: Common.Theme.fontFamily
+                            font.pixelSize: 20
+                        }
+
+                        popup: Popup {
+                            y: buildingCombo.height + 6
+                            width: buildingCombo.width
+                            padding: 6
+                            implicitHeight: Math.min(contentItem.implicitHeight + padding * 2, 220)
+                            background: Rectangle {
+                                radius: Common.Theme.radiusM
+                                color: "white"
+                                border.width: 1
+                                border.color: "#cfd8e6"
+                            }
+                            contentItem: ListView {
+                                clip: true
+                                implicitHeight: contentHeight
+                                model: buildingCombo.popup.visible ? buildingCombo.delegateModel : null
+                                currentIndex: buildingCombo.highlightedIndex
+                                ScrollBar.vertical: ScrollBar {}
+                            }
+                        }
+
+                        delegate: ItemDelegate {
+                            required property var modelData
+                            required property int index
+                            width: buildingCombo.width - 12
+                            padding: 12
+                            highlighted: buildingCombo.highlightedIndex === index
+                            contentItem: Text {
+                                text: String(modelData)
+                                color: Common.Theme.textPrimary
+                                font.family: Common.Theme.fontFamily
+                                font.pixelSize: 14
+                                elide: Text.ElideRight
+                            }
+                            background: Rectangle {
+                                radius: Common.Theme.radiusS
+                                color: parent.highlighted ? "#edf4ff" : "transparent"
+                            }
+                        }
                     }
 
                     ComboBox {
                         id: floorCombo
                         Layout.fillWidth: true
+                        Layout.preferredHeight: 54
                         model: root.floorOptions
                         currentIndex: root.floorIndex
+                        leftPadding: 16
+                        rightPadding: 40
+                        topPadding: 14
+                        bottomPadding: 14
+
+                        contentItem: Text {
+                            text: floorCombo.displayText
+                            color: Common.Theme.textPrimary
+                            font.family: Common.Theme.fontFamily
+                            font.pixelSize: 15
+                            verticalAlignment: Text.AlignVCenter
+                            elide: Text.ElideRight
+                        }
+
+                        background: Rectangle {
+                            radius: Common.Theme.radiusM
+                            color: "#f7faff"
+                            border.width: 1
+                            border.color: floorCombo.activeFocus ? Common.Theme.accent : "#cfd8e6"
+                        }
+
+                        indicator: Text {
+                            anchors.right: parent.right
+                            anchors.rightMargin: 14
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: "⌄"
+                            color: Common.Theme.textSecondary
+                            font.family: Common.Theme.fontFamily
+                            font.pixelSize: 20
+                        }
+
+                        popup: Popup {
+                            y: floorCombo.height + 6
+                            width: floorCombo.width
+                            padding: 6
+                            implicitHeight: Math.min(contentItem.implicitHeight + padding * 2, 220)
+                            background: Rectangle {
+                                radius: Common.Theme.radiusM
+                                color: "white"
+                                border.width: 1
+                                border.color: "#cfd8e6"
+                            }
+                            contentItem: ListView {
+                                clip: true
+                                implicitHeight: contentHeight
+                                model: floorCombo.popup.visible ? floorCombo.delegateModel : null
+                                currentIndex: floorCombo.highlightedIndex
+                                ScrollBar.vertical: ScrollBar {}
+                            }
+                        }
+
+                        delegate: ItemDelegate {
+                            required property var modelData
+                            required property int index
+                            width: floorCombo.width - 12
+                            padding: 12
+                            highlighted: floorCombo.highlightedIndex === index
+                            contentItem: Text {
+                                text: String(modelData)
+                                color: Common.Theme.textPrimary
+                                font.family: Common.Theme.fontFamily
+                                font.pixelSize: 14
+                                elide: Text.ElideRight
+                            }
+                            background: Rectangle {
+                                radius: Common.Theme.radiusS
+                                color: parent.highlighted ? "#edf4ff" : "transparent"
+                            }
+                        }
                     }
 
                     ComboBox {
                         id: suffixCombo
                         Layout.fillWidth: true
+                        Layout.preferredHeight: 54
                         model: root.roomSuffixOptions
                         currentIndex: root.roomSuffixIndex
+                        leftPadding: 16
+                        rightPadding: 40
+                        topPadding: 14
+                        bottomPadding: 14
+
+                        contentItem: Text {
+                            text: suffixCombo.displayText
+                            color: Common.Theme.textPrimary
+                            font.family: Common.Theme.fontFamily
+                            font.pixelSize: 15
+                            verticalAlignment: Text.AlignVCenter
+                            elide: Text.ElideRight
+                        }
+
+                        background: Rectangle {
+                            radius: Common.Theme.radiusM
+                            color: "#f7faff"
+                            border.width: 1
+                            border.color: suffixCombo.activeFocus ? Common.Theme.accent : "#cfd8e6"
+                        }
+
+                        indicator: Text {
+                            anchors.right: parent.right
+                            anchors.rightMargin: 14
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: "⌄"
+                            color: Common.Theme.textSecondary
+                            font.family: Common.Theme.fontFamily
+                            font.pixelSize: 20
+                        }
+
+                        popup: Popup {
+                            y: suffixCombo.height + 6
+                            width: suffixCombo.width
+                            padding: 6
+                            implicitHeight: Math.min(contentItem.implicitHeight + padding * 2, 220)
+                            background: Rectangle {
+                                radius: Common.Theme.radiusM
+                                color: "white"
+                                border.width: 1
+                                border.color: "#cfd8e6"
+                            }
+                            contentItem: ListView {
+                                clip: true
+                                implicitHeight: contentHeight
+                                model: suffixCombo.popup.visible ? suffixCombo.delegateModel : null
+                                currentIndex: suffixCombo.highlightedIndex
+                                ScrollBar.vertical: ScrollBar {}
+                            }
+                        }
+
+                        delegate: ItemDelegate {
+                            required property var modelData
+                            required property int index
+                            width: suffixCombo.width - 12
+                            padding: 12
+                            highlighted: suffixCombo.highlightedIndex === index
+                            contentItem: Text {
+                                text: String(modelData)
+                                color: Common.Theme.textPrimary
+                                font.family: Common.Theme.fontFamily
+                                font.pixelSize: 14
+                                elide: Text.ElideRight
+                            }
+                            background: Rectangle {
+                                radius: Common.Theme.radiusS
+                                color: parent.highlighted ? "#edf4ff" : "transparent"
+                            }
+                        }
+                    }
+                }
+
+                TextField {
+                    id: manualRoomField
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 54
+                    placeholderText: "完整房间号，支持手动输入"
+                    color: Common.Theme.textPrimary
+                    font.family: Common.Theme.fontFamily
+                    font.pixelSize: 15
+                    leftPadding: 16
+                    rightPadding: 16
+                    topPadding: 14
+                    bottomPadding: 14
+                    selectByMouse: true
+
+                    background: Rectangle {
+                        radius: Common.Theme.radiusM
+                        color: "#f7faff"
+                        border.width: 1
+                        border.color: manualRoomField.activeFocus ? Common.Theme.accent : "#cfd8e6"
                     }
                 }
 
@@ -359,6 +629,7 @@ Item {
                         font.family: Common.Theme.fontFamily
                         font.pixelSize: 16
                         font.bold: true
+                        elide: Text.ElideRight
                     }
                 }
 
@@ -366,12 +637,6 @@ Item {
 
                 RowLayout {
                     Layout.fillWidth: true
-
-                    Common.ActionButton {
-                        id: checkStatusButton
-                        text: "检查状态"
-                        variant: "secondary"
-                    }
 
                     Item { Layout.fillWidth: true }
 
