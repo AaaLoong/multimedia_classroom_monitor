@@ -47,4 +47,4 @@
 - Frontend: Qt Quick/QML, admin (ruoyi-like layout) + classroom (simplified control).  
 - Backend: C++/Qt + cpp-httplib REST, paho-mqtt-cpp for MQTT bridge, MySQL persistence via DbStore (QMYSQL).  
 - Messaging: MQTT for state/heartbeat/alerts; REST for control, lock, listings, login.  
-- DB: MySQL 8.4 (tables: devices, alerts, operations, meta for lock flag). Keep env vars in runtime config, not in code.
+- DB: MySQL 8.4 (tables: devices, alerts, command_jobs, classroom_registry, admin_users, meta for lock flag). Keep env vars in runtime config, not in code.

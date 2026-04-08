@@ -70,6 +70,8 @@ static QString errorMessageFromDocument(const QJsonDocument &doc, const QString 
             return QStringLiteral("未找到该管理员");
         if (error == "cannot_delete_super_admin")
             return QStringLiteral("超级管理员不可删除");
+        if (error == "cannot_reset_super_admin")
+            return QStringLiteral("超级管理员不可重置密码");
         if (error == "password_change_forbidden")
             return QStringLiteral("当前账号不支持修改密码");
         if (error == "invalid_current_password")
@@ -96,6 +98,8 @@ static QString errorMessageFromDocument(const QJsonDocument &doc, const QString 
             return QStringLiteral("新增管理员失败");
         if (error == "delete_admin_failed")
             return QStringLiteral("删除管理员失败");
+        if (error == "reset_admin_password_failed")
+            return QStringLiteral("重置管理员密码失败");
         if (error == "update_password_failed")
             return QStringLiteral("修改密码失败");
         if (error == "unauthorized")
@@ -731,12 +735,11 @@ void RestClient::fetchAdminUsers()
     });
 }
 
-void RestClient::createAdminUser(const QString &username, const QString &password)
+void RestClient::createAdminUser(const QString &username)
 {
     setBusy(true);
     QJsonObject obj;
     obj["username"] = username.trimmed();
-    obj["password"] = password;
     auto reply = nam_.post(makeRequest("/admin-users"), QJsonDocument(obj).toJson(QJsonDocument::Compact));
     handleReply(reply, [=](const QJsonDocument &) {
         emit operationFinished("admin_create", QStringLiteral("管理员已新增"));
@@ -757,6 +760,23 @@ void RestClient::deleteAdminUser(const QString &username)
     auto reply = nam_.deleteResource(makeRequest(QString("/admin-users/%1").arg(encoded)));
     handleReply(reply, [=](const QJsonDocument &) {
         emit operationFinished("admin_delete", QStringLiteral("管理员已删除"));
+        fetchAdminUsers();
+    });
+}
+
+void RestClient::resetAdminUserPassword(const QString &username)
+{
+    const QString target = username.trimmed();
+    if (target.isEmpty()) {
+        emit error(QStringLiteral("管理员账号为空，无法重置密码"));
+        return;
+    }
+
+    setBusy(true);
+    const QString encoded = QString::fromUtf8(QUrl::toPercentEncoding(target));
+    auto reply = nam_.post(makeRequest(QString("/admin-users/%1/reset-password").arg(encoded)), QByteArray());
+    handleReply(reply, [=](const QJsonDocument &) {
+        emit operationFinished("admin_reset_password", QStringLiteral("密码已重置为初始密码"));
         fetchAdminUsers();
     });
 }

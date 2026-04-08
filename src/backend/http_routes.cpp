@@ -138,8 +138,7 @@ void HttpRoutes::registerRoutes(httplib::Server &server)
         const auto body = QJsonDocument::fromJson(QByteArray::fromStdString(req.body)).object();
         respondAuthResult(res,
                           ctx_.auth.createAdminUser(session,
-                                                    body.value("username").toString().trimmed(),
-                                                    body.value("password").toString()));
+                                                    body.value("username").toString().trimmed()));
     });
 
     server.Delete(R"(/admin-users/([\w\-]+))", [&](const httplib::Request &req, httplib::Response &res) {
@@ -151,6 +150,17 @@ void HttpRoutes::registerRoutes(httplib::Server &server)
         respondAuthResult(res,
                           ctx_.auth.deleteAdminUser(session,
                                                     QString::fromStdString(req.matches[1]).trimmed()));
+    });
+
+    server.Post(R"(/admin-users/([^/]+)/reset-password)", [&](const httplib::Request &req, httplib::Response &res) {
+        AdminSession session;
+        if (!ctx_.auth.currentSession(req, &session)) {
+            respondError(res, "unauthorized", 401);
+            return;
+        }
+        respondAuthResult(res,
+                          ctx_.auth.resetAdminUserPassword(session,
+                                                           decodedPathSegment(req.matches, 1)));
     });
 
     server.Post("/me/password", [&](const httplib::Request &req, httplib::Response &res) {

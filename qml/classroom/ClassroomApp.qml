@@ -724,7 +724,7 @@ ApplicationWindow {
                     deviceModel.refresh()
                     window.resetDeviceStats()
                     window.awaitingBulkCompletionAction = ""
-                    window.statusText = "未获取到有效绑定房号，请重新接入"
+                    window.statusText = "未获取到有效房号，请重新接入"
                     return
                 }
                 window.roomId = resolvedRoomId

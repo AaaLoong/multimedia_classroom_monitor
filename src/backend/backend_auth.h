@@ -43,9 +43,9 @@ public:
     AuthOperationResult login(const QString &username, const QString &password);
     AuthOperationResult listAdminUsers(const AdminSession &session);
     AuthOperationResult createAdminUser(const AdminSession &session,
-                                        const QString &username,
-                                        const QString &password);
+                                        const QString &username);
     AuthOperationResult deleteAdminUser(const AdminSession &session, const QString &username);
+    AuthOperationResult resetAdminUserPassword(const AdminSession &session, const QString &username);
     AuthOperationResult updateOwnPassword(const AdminSession &session,
                                           const QString &oldPassword,
                                           const QString &newPassword);

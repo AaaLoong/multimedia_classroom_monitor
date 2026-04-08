@@ -96,10 +96,6 @@ Dialog {
                 interactive: contentHeight > height
                 clip: true
 
-                ScrollBar.vertical: ScrollBar {
-                    policy: bodyFlick.contentHeight > bodyFlick.height ? ScrollBar.AsNeeded : ScrollBar.AlwaysOff
-                }
-
                 ColumnLayout {
                     id: bodyColumn
                     x: root.bodyPadding

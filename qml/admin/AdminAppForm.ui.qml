@@ -27,7 +27,12 @@ Item {
     property int alertCount: 0
     property string devicePageMode: "rooms"
     property string selectedRoomId: ""
+    property string roomDeviceStatusText: ""
+    property string roomSearchText: ""
+    readonly property int pageScrollBarWidth: 10
+    readonly property int pageScrollBarReserve: pageScrollBarWidth + Common.Theme.spaceS
     property var roomSummaryListModel
+    property var deviceRoomListModel
     property var alertPreviewModel
     property var alertListModel
     property var deviceListModel
@@ -49,10 +54,11 @@ Item {
     property alias deviceListView: deviceListView
 
     signal roomSelected(string roomId)
-    signal backToRoomsRequested()
-    signal refreshDevicePageRequested()
-    signal powerOnRequested()
-    signal powerOffRequested()
+    signal backToRoomsRequested
+    signal roomSearchTextEdited(string text)
+    signal refreshDevicePageRequested
+    signal powerOnRequested
+    signal powerOffRequested
     signal processAlertRequested(int alertId)
     signal processAllAlertsRequested
 
@@ -153,30 +159,31 @@ Item {
                     hoverEnabled: enabled
                     checked: root.navIndex === 0
                     transformOrigin: Item.Center
-                    scale: overviewNavButton.enabled
-                           ? (overviewNavButton.down ? 0.985 : (overviewNavButton.hovered ? 1.01 : 1.0))
-                           : 1.0
+                    scale: overviewNavButton.enabled ? (overviewNavButton.down ? 0.985 : (overviewNavButton.hovered ? 1.01 : 1.0)) : 1.0
 
                     Behavior on scale {
-                        NumberAnimation { duration: 90; easing.type: Easing.OutCubic }
+                        NumberAnimation {
+                            duration: 90
+                            easing.type: Easing.OutCubic
+                        }
                     }
 
                     background: Rectangle {
                         radius: 24
-                        color: overviewNavButton.checked
-                               ? (overviewNavButton.down ? "#1f4ea9" : (overviewNavButton.hovered ? "#255bc2" : Common.Theme.accent))
-                               : (overviewNavButton.down ? "#eef3fa" : (overviewNavButton.hovered ? "#f4f8ff" : "#fcfdff"))
+                        color: overviewNavButton.checked ? (overviewNavButton.down ? "#1f4ea9" : (overviewNavButton.hovered ? "#255bc2" : Common.Theme.accent)) : (overviewNavButton.down ? "#eef3fa" : (overviewNavButton.hovered ? "#f4f8ff" : "#fcfdff"))
                         border.width: 1
-                        border.color: overviewNavButton.checked
-                                      ? (overviewNavButton.hovered ? "#5b87ea" : Common.Theme.accent)
-                                      : (overviewNavButton.hovered ? "#9fbaf0" : Common.Theme.borderColor)
+                        border.color: overviewNavButton.checked ? (overviewNavButton.hovered ? "#5b87ea" : Common.Theme.accent) : (overviewNavButton.hovered ? "#9fbaf0" : Common.Theme.borderColor)
 
                         Behavior on color {
-                            ColorAnimation { duration: 120 }
+                            ColorAnimation {
+                                duration: 120
+                            }
                         }
 
                         Behavior on border.color {
-                            ColorAnimation { duration: 120 }
+                            ColorAnimation {
+                                duration: 120
+                            }
                         }
                     }
                     contentItem: Row {
@@ -225,30 +232,31 @@ Item {
                     hoverEnabled: enabled
                     checked: root.navIndex === 1
                     transformOrigin: Item.Center
-                    scale: deviceNavButton.enabled
-                           ? (deviceNavButton.down ? 0.985 : (deviceNavButton.hovered ? 1.01 : 1.0))
-                           : 1.0
+                    scale: deviceNavButton.enabled ? (deviceNavButton.down ? 0.985 : (deviceNavButton.hovered ? 1.01 : 1.0)) : 1.0
 
                     Behavior on scale {
-                        NumberAnimation { duration: 90; easing.type: Easing.OutCubic }
+                        NumberAnimation {
+                            duration: 90
+                            easing.type: Easing.OutCubic
+                        }
                     }
 
                     background: Rectangle {
                         radius: 24
-                        color: deviceNavButton.checked
-                               ? (deviceNavButton.down ? "#1f4ea9" : (deviceNavButton.hovered ? "#255bc2" : Common.Theme.accent))
-                               : (deviceNavButton.down ? "#eef3fa" : (deviceNavButton.hovered ? "#f4f8ff" : "#fcfdff"))
+                        color: deviceNavButton.checked ? (deviceNavButton.down ? "#1f4ea9" : (deviceNavButton.hovered ? "#255bc2" : Common.Theme.accent)) : (deviceNavButton.down ? "#eef3fa" : (deviceNavButton.hovered ? "#f4f8ff" : "#fcfdff"))
                         border.width: 1
-                        border.color: deviceNavButton.checked
-                                      ? (deviceNavButton.hovered ? "#5b87ea" : Common.Theme.accent)
-                                      : (deviceNavButton.hovered ? "#9fbaf0" : Common.Theme.borderColor)
+                        border.color: deviceNavButton.checked ? (deviceNavButton.hovered ? "#5b87ea" : Common.Theme.accent) : (deviceNavButton.hovered ? "#9fbaf0" : Common.Theme.borderColor)
 
                         Behavior on color {
-                            ColorAnimation { duration: 120 }
+                            ColorAnimation {
+                                duration: 120
+                            }
                         }
 
                         Behavior on border.color {
-                            ColorAnimation { duration: 120 }
+                            ColorAnimation {
+                                duration: 120
+                            }
                         }
                     }
                     contentItem: Row {
@@ -297,30 +305,31 @@ Item {
                     hoverEnabled: enabled
                     checked: root.navIndex === 2
                     transformOrigin: Item.Center
-                    scale: alertNavButton.enabled
-                           ? (alertNavButton.down ? 0.985 : (alertNavButton.hovered ? 1.01 : 1.0))
-                           : 1.0
+                    scale: alertNavButton.enabled ? (alertNavButton.down ? 0.985 : (alertNavButton.hovered ? 1.01 : 1.0)) : 1.0
 
                     Behavior on scale {
-                        NumberAnimation { duration: 90; easing.type: Easing.OutCubic }
+                        NumberAnimation {
+                            duration: 90
+                            easing.type: Easing.OutCubic
+                        }
                     }
 
                     background: Rectangle {
                         radius: 24
-                        color: alertNavButton.checked
-                               ? (alertNavButton.down ? "#1f4ea9" : (alertNavButton.hovered ? "#255bc2" : Common.Theme.accent))
-                               : (alertNavButton.down ? "#eef3fa" : (alertNavButton.hovered ? "#f4f8ff" : "#fcfdff"))
+                        color: alertNavButton.checked ? (alertNavButton.down ? "#1f4ea9" : (alertNavButton.hovered ? "#255bc2" : Common.Theme.accent)) : (alertNavButton.down ? "#eef3fa" : (alertNavButton.hovered ? "#f4f8ff" : "#fcfdff"))
                         border.width: 1
-                        border.color: alertNavButton.checked
-                                      ? (alertNavButton.hovered ? "#5b87ea" : Common.Theme.accent)
-                                      : (alertNavButton.hovered ? "#9fbaf0" : Common.Theme.borderColor)
+                        border.color: alertNavButton.checked ? (alertNavButton.hovered ? "#5b87ea" : Common.Theme.accent) : (alertNavButton.hovered ? "#9fbaf0" : Common.Theme.borderColor)
 
                         Behavior on color {
-                            ColorAnimation { duration: 120 }
+                            ColorAnimation {
+                                duration: 120
+                            }
                         }
 
                         Behavior on border.color {
-                            ColorAnimation { duration: 120 }
+                            ColorAnimation {
+                                duration: 120
+                            }
                         }
                     }
                     contentItem: Row {
@@ -463,7 +472,7 @@ Item {
 
                             Common.ActionButton {
                                 id: manageAdminsButton
-                                text: "管理管理员"
+                                text: "管理员管理"
                                 variant: "secondary"
                                 visible: root.isSuperAdmin
                             }
@@ -477,7 +486,7 @@ Item {
 
                             Common.ActionButton {
                                 id: syncButton
-                                text: "同步数据"
+                                text: "刷新"
                                 variant: "secondary"
                             }
 
@@ -495,23 +504,22 @@ Item {
                     Layout.fillHeight: true
                     currentIndex: root.navIndex
 
-                    Flickable {
-                        clip: true
-                        contentWidth: width
-                        contentHeight: overviewContent.height
-                        ScrollBar.vertical: ScrollBar {}
-
-                        Column {
-                            id: overviewContent
-                            width: parent.width
+                    Item {
+                        ColumnLayout {
+                            anchors.fill: parent
                             spacing: Common.Theme.spaceL
 
                             Flow {
-                                width: parent.width
+                                id: overviewMetricsFlow
+                                Layout.fillWidth: true
                                 spacing: Common.Theme.spaceL
 
                                 Common.MetricCard {
-                                    width: overviewContent.width >= 1120 ? (overviewContent.width - Common.Theme.spaceL * 3) / 4 : (overviewContent.width - Common.Theme.spaceL) / 2
+                                    width: overviewMetricsFlow.width
+                                           >= 1120 ? (overviewMetricsFlow.width
+                                                      - Common.Theme.spaceL * 3)
+                                                     / 4 : (overviewMetricsFlow.width
+                                                            - Common.Theme.spaceL) / 2
                                     title: "已接入教室"
                                     value: String(root.roomCount)
                                     iconText: "教"
@@ -520,7 +528,11 @@ Item {
                                 }
 
                                 Common.MetricCard {
-                                    width: overviewContent.width >= 1120 ? (overviewContent.width - Common.Theme.spaceL * 3) / 4 : (overviewContent.width - Common.Theme.spaceL) / 2
+                                    width: overviewMetricsFlow.width
+                                           >= 1120 ? (overviewMetricsFlow.width
+                                                      - Common.Theme.spaceL * 3)
+                                                     / 4 : (overviewMetricsFlow.width
+                                                            - Common.Theme.spaceL) / 2
                                     title: "活跃教室"
                                     value: String(root.activeRoomCount)
                                     iconText: "活"
@@ -529,7 +541,11 @@ Item {
                                 }
 
                                 Common.MetricCard {
-                                    width: overviewContent.width >= 1120 ? (overviewContent.width - Common.Theme.spaceL * 3) / 4 : (overviewContent.width - Common.Theme.spaceL) / 2
+                                    width: overviewMetricsFlow.width
+                                           >= 1120 ? (overviewMetricsFlow.width
+                                                      - Common.Theme.spaceL * 3)
+                                                     / 4 : (overviewMetricsFlow.width
+                                                            - Common.Theme.spaceL) / 2
                                     title: "在线设备"
                                     value: root.onlineDeviceCount + " / " + root.totalDeviceCount
                                     iconText: "设"
@@ -538,7 +554,11 @@ Item {
                                 }
 
                                 Common.MetricCard {
-                                    width: overviewContent.width >= 1120 ? (overviewContent.width - Common.Theme.spaceL * 3) / 4 : (overviewContent.width - Common.Theme.spaceL) / 2
+                                    width: overviewMetricsFlow.width
+                                           >= 1120 ? (overviewMetricsFlow.width
+                                                      - Common.Theme.spaceL * 3)
+                                                     / 4 : (overviewMetricsFlow.width
+                                                            - Common.Theme.spaceL) / 2
                                     title: "待处理异常"
                                     value: String(root.alertCount)
                                     iconText: "警"
@@ -547,201 +567,234 @@ Item {
                                 }
                             }
 
-                            Flow {
-                                width: parent.width
-                                spacing: Common.Theme.spaceL
+                            Item {
+                                id: overviewScrollArea
+                                Layout.fillWidth: true
+                                Layout.fillHeight: true
 
-                                Common.SurfaceCard {
-                                    width: overviewContent.width
-                                           >= 1200 ? (overviewContent.width - Common.Theme.spaceL)
-                                                     / 2 : overviewContent.width
-                                    height: roomSection.implicitHeight + padding * 2
+                                Flickable {
+                                    id: overviewFlickable
+                                    anchors.fill: parent
+                                    anchors.rightMargin: root.pageScrollBarReserve
+                                    clip: true
+                                    contentWidth: width
+                                    contentHeight: overviewScrollableContent.implicitHeight
+                                    boundsBehavior: Flickable.StopAtBounds
 
-                                    Column {
-                                        id: roomSection
-                                        width: parent.width
-                                        spacing: Common.Theme.spaceL
+                                    ScrollBar.vertical: ScrollBar {
+                                        parent: overviewScrollArea
+                                        anchors.top: overviewFlickable.top
+                                        anchors.bottom: overviewFlickable.bottom
+                                        anchors.right: parent.right
+                                        width: root.pageScrollBarWidth
+                                        policy: ScrollBar.AsNeeded
 
-                                        Common.SectionHeader {
-                                            width: parent.width
-                                            title: "教室状态"
-                                            subtitle: "按教室聚合查看运行与异常状态"
+                                        background: Rectangle {
+                                            radius: width / 2
+                                            color: "#eef3fa"
                                         }
 
-                                        Flow {
-                                            id: roomFlow
-                                            width: parent.width
-                                            spacing: Common.Theme.spaceM
-
-                                            Repeater {
-                                                model: root.roomSummaryListModel
-
-                                                delegate: Rectangle {
-                                                    required property string roomId
-                                                    required property string stateText
-                                                    required property color stateColor
-                                                    required property color stateFill
-                                                    required property string detail
-                                                    width: roomFlow.width >= 840 ? (roomFlow.width - Common.Theme.spaceM) / 2 : roomFlow.width
-                                                    height: 108
-                                                    radius: Common.Theme.radiusM
-                                                    color: "#fcfdff"
-                                                    border.width: 1
-                                                    border.color: Common.Theme.borderColor
-
-                                                    Column {
-                                                        anchors.fill: parent
-                                                        anchors.margins: Common.Theme.spaceL
-                                                        spacing: Common.Theme.spaceS
-
-                                                        RowLayout {
-                                                            width: parent.width
-
-                                                            Text {
-                                                                text: roomId
-                                                                color: Common.Theme.textPrimary
-                                                                font.family: Common.Theme.fontFamily
-                                                                font.pixelSize: 22
-                                                                font.bold: true
-                                                            }
-
-                                                            Item {
-                                                                Layout.fillWidth: true
-                                                            }
-
-                                                            Common.StatusChip {
-                                                                text: stateText
-                                                                toneColor: stateColor
-                                                                fillColor: stateFill
-                                                            }
-                                                        }
-
-                                                        Text {
-                                                            text: detail
-                                                            color: Common.Theme.textSecondary
-                                                            font.family: Common.Theme.fontFamily
-                                                            font.pixelSize: 13
-                                                            width: parent.width
-                                                            elide: Text.ElideRight
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-
-                                        Text {
-                                            visible: !root.roomSummaryListModel
-                                                     || root.roomSummaryListModel.count === 0
-                                            text: "当前还没有已同步教室。"
-                                            color: Common.Theme.textSecondary
-                                            font.family: Common.Theme.fontFamily
-                                            font.pixelSize: 13
+                                        contentItem: Rectangle {
+                                            radius: width / 2
+                                            color: "#b8c6dc"
                                         }
                                     }
-                                }
-
-                                Common.SurfaceCard {
-                                    width: overviewContent.width
-                                           >= 1200 ? (overviewContent.width - Common.Theme.spaceL)
-                                                     / 2 : overviewContent.width
-                                    height: alertSection.implicitHeight + padding * 2
 
                                     Column {
-                                        id: alertSection
-                                        width: parent.width
+                                        id: overviewScrollableContent
+                                        width: overviewFlickable.width
                                         spacing: Common.Theme.spaceL
 
-                                        Common.SectionHeader {
+                                        Flow {
                                             width: parent.width
-                                            title: "速览"
-                                            subtitle: "查看最新故障、离线与报修"
+                                            spacing: Common.Theme.spaceL
 
-                                            Common.ActionButton {
-                                                id: viewAllAlertsButton
-                                                text: "查看全部"
-                                                variant: "ghost"
-                                                minWidth: 96
-                                            }
-                                        }
+                                            Common.SurfaceCard {
+                                                width: overviewScrollableContent.width >= 1200 ? (overviewScrollableContent.width - Common.Theme.spaceL) / 2 : overviewScrollableContent.width
+                                                height: roomSection.implicitHeight + padding * 2
 
-                                        Repeater {
-                                            model: root.alertPreviewModel
+                                                Column {
+                                                    id: roomSection
+                                                    width: parent.width
+                                                    spacing: Common.Theme.spaceL
 
-                                            delegate: Rectangle {
-                                                required property int alertId
-                                                required property string level
-                                                required property string roomId
-                                                required property string deviceId
-                                                required property string message
-                                                width: parent.width
-                                                height: 56
-                                                radius: Common.Theme.radiusM
-                                                color: "#fbfcff"
-                                                border.width: 1
-                                                border.color: Common.Theme.borderColor
-
-                                                RowLayout {
-                                                    anchors.fill: parent
-                                                    anchors.margins: Common.Theme.spaceL
-                                                    spacing: Common.Theme.spaceM
-
-                                                    Rectangle {
-                                                        width: 10
-                                                        height: 10
-                                                        radius: 5
-                                                        color: Common.Theme.severityColor(
-                                                                   level)
-                                                        Layout.alignment: Qt.AlignVCenter
+                                                    Common.SectionHeader {
+                                                        width: parent.width
+                                                        title: "教室状态"
                                                     }
 
-                                                    Common.StatusChip {
-                                                        Layout.alignment: Qt.AlignVCenter
-                                                        text: Common.Theme.severityLabel(
-                                                                  level)
-                                                        toneColor: Common.Theme.severityColor(
-                                                                       level)
-                                                        fillColor: Common.Theme.severityFill(
-                                                                       level)
+                                                    Flow {
+                                                        id: roomFlow
+                                                        width: parent.width
+                                                        spacing: Common.Theme.spaceM
+
+                                                        Repeater {
+                                                            model: root.roomSummaryListModel
+
+                                                            delegate: Rectangle {
+                                                                required property string roomId
+                                                                required property string stateText
+                                                                required property color stateColor
+                                                                required property color stateFill
+                                                                required property string detail
+                                                                width: roomFlow.width >= 840 ? (roomFlow.width - Common.Theme.spaceM) / 2 : roomFlow.width
+                                                                height: 108
+                                                                radius: Common.Theme.radiusM
+                                                                color: "#fcfdff"
+                                                                border.width: 1
+                                                                border.color: Common.Theme.borderColor
+
+                                                                Column {
+                                                                    anchors.fill: parent
+                                                                    anchors.margins: Common.Theme.spaceL
+                                                                    spacing: Common.Theme.spaceS
+
+                                                                    RowLayout {
+                                                                        width: parent.width
+
+                                                                        Text {
+                                                                            text: roomId
+                                                                            color: Common.Theme.textPrimary
+                                                                            font.family: Common.Theme.fontFamily
+                                                                            font.pixelSize: 22
+                                                                            font.bold: true
+                                                                        }
+
+                                                                        Item {
+                                                                            Layout.fillWidth: true
+                                                                        }
+
+                                                                        Common.StatusChip {
+                                                                            text: stateText
+                                                                            toneColor: stateColor
+                                                                            fillColor: stateFill
+                                                                        }
+                                                                    }
+
+                                                                    Text {
+                                                                        text: detail
+                                                                        color: Common.Theme.textSecondary
+                                                                        font.family: Common.Theme.fontFamily
+                                                                        font.pixelSize: 13
+                                                                        width: parent.width
+                                                                        elide: Text.ElideRight
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
                                                     }
 
                                                     Text {
-                                                        text: roomId + "/" + deviceId
-                                                        color: Common.Theme.textPrimary
-                                                        Layout.alignment: Qt.AlignVCenter
-                                                        font.family: Common.Theme.fontFamily
-                                                        font.pixelSize: 13
-                                                        font.bold: true
-                                                    }
-
-                                                    Text {
-                                                        Layout.fillWidth: true
-                                                        text: message
+                                                        visible: !root.roomSummaryListModel
+                                                                 || root.roomSummaryListModel.count
+                                                                 === 0
+                                                        text: "当前还没有已同步教室。"
                                                         color: Common.Theme.textSecondary
-                                                        Layout.alignment: Qt.AlignVCenter
-                                                        elide: Text.ElideRight
                                                         font.family: Common.Theme.fontFamily
                                                         font.pixelSize: 13
-                                                    }
-
-                                                    Common.ActionButton {
-                                                        text: "已处理"
-                                                        variant: "secondary"
-                                                        minWidth: 76
-                                                        maxWidth: 92
-                                                        onClicked: root.processAlertRequested(
-                                                                       alertId)
                                                     }
                                                 }
                                             }
-                                        }
 
-                                        Text {
-                                            visible: !root.alertPreviewModel
-                                                     || root.alertPreviewModel.count === 0
-                                            text: "当前没有新的异常。"
-                                            color: Common.Theme.textSecondary
-                                            font.family: Common.Theme.fontFamily
-                                            font.pixelSize: 13
+                                            Common.SurfaceCard {
+                                                width: overviewScrollableContent.width >= 1200 ? (overviewScrollableContent.width - Common.Theme.spaceL) / 2 : overviewScrollableContent.width
+                                                height: alertSection.implicitHeight + padding * 2
+
+                                                Column {
+                                                    id: alertSection
+                                                    width: parent.width
+                                                    spacing: Common.Theme.spaceL
+
+                                                    Common.SectionHeader {
+                                                        width: parent.width
+                                                        title: "速览"
+                                                        subtitle: "查看最新故障、离线与报修"
+
+                                                        Common.ActionButton {
+                                                            id: viewAllAlertsButton
+                                                            text: "查看全部"
+                                                            variant: "ghost"
+                                                            minWidth: 96
+                                                        }
+                                                    }
+
+                                                    Repeater {
+                                                        model: root.alertPreviewModel
+
+                                                        delegate: Rectangle {
+                                                            required property int alertId
+                                                            required property string level
+                                                            required property string roomId
+                                                            required property string deviceId
+                                                            required property string message
+                                                            width: parent.width
+                                                            height: 56
+                                                            radius: Common.Theme.radiusM
+                                                            color: "#fbfcff"
+                                                            border.width: 1
+                                                            border.color: Common.Theme.borderColor
+
+                                                            RowLayout {
+                                                                anchors.fill: parent
+                                                                anchors.margins: Common.Theme.spaceL
+                                                                spacing: Common.Theme.spaceM
+
+                                                                Rectangle {
+                                                                    width: 10
+                                                                    height: 10
+                                                                    radius: 5
+                                                                    color: Common.Theme.severityColor(level)
+                                                                    Layout.alignment: Qt.AlignVCenter
+                                                                }
+
+                                                                Common.StatusChip {
+                                                                    Layout.alignment: Qt.AlignVCenter
+                                                                    text: Common.Theme.severityLabel(level)
+                                                                    toneColor: Common.Theme.severityColor(level)
+                                                                    fillColor: Common.Theme.severityFill(level)
+                                                                }
+
+                                                                Text {
+                                                                    text: roomId + "/" + deviceId
+                                                                    color: Common.Theme.textPrimary
+                                                                    Layout.alignment: Qt.AlignVCenter
+                                                                    font.family: Common.Theme.fontFamily
+                                                                    font.pixelSize: 13
+                                                                    font.bold: true
+                                                                }
+
+                                                                Text {
+                                                                    Layout.fillWidth: true
+                                                                    text: message
+                                                                    color: Common.Theme.textSecondary
+                                                                    Layout.alignment: Qt.AlignVCenter
+                                                                    elide: Text.ElideRight
+                                                                    font.family: Common.Theme.fontFamily
+                                                                    font.pixelSize: 13
+                                                                }
+
+                                                                Common.ActionButton {
+                                                                    text: "已处理"
+                                                                    variant: "secondary"
+                                                                    minWidth: 76
+                                                                    maxWidth: 92
+                                                                    onClicked: root.processAlertRequested(alertId)
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+
+                                                    Text {
+                                                        visible: !root.alertPreviewModel
+                                                                 || root.alertPreviewModel.count
+                                                                 === 0
+                                                        text: "当前没有新的异常。"
+                                                        color: Common.Theme.textSecondary
+                                                        font.family: Common.Theme.fontFamily
+                                                        font.pixelSize: 13
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -778,22 +831,32 @@ Item {
                                                 Common.SectionHeader {
                                                     Layout.fillWidth: true
                                                     title: "教室列表"
-                                                    subtitle: "选择教室查看该教室内的全部设备"
 
-                                                    Common.ActionButton {
-                                                        text: "刷新设备"
-                                                        variant: "secondary"
-                                                        onClicked: root.refreshDevicePageRequested()
+                                                    TextField {
+                                                        id: roomSearchField
+                                                        Layout.preferredWidth: 240
+                                                        Layout.preferredHeight: 42
+                                                        placeholderText: "搜索教室"
+                                                        text: root.roomSearchText
+                                                        color: Common.Theme.textPrimary
+                                                        font.family: Common.Theme.fontFamily
+                                                        font.pixelSize: 14
+                                                        leftPadding: 14
+                                                        rightPadding: 14
+                                                        topPadding: 11
+                                                        bottomPadding: 11
+                                                        selectByMouse: true
+
+                                                        background: Rectangle {
+                                                            radius: Common.Theme.radiusM
+                                                            color: "#f7faff"
+                                                            border.width: 1
+                                                            border.color: roomSearchField.activeFocus ? Common.Theme.accent : "#cfd8e6"
+                                                        }
+
+                                                        onTextChanged: root.roomSearchTextEdited(
+                                                                           text)
                                                     }
-                                                }
-
-                                                Text {
-                                                    Layout.fillWidth: true
-                                                    text: root.statusText
-                                                    color: Common.Theme.textSecondary
-                                                    font.family: Common.Theme.fontFamily
-                                                    font.pixelSize: 13
-                                                    elide: Text.ElideRight
                                                 }
                                             }
                                         }
@@ -809,9 +872,29 @@ Item {
                                                 ListView {
                                                     id: roomListView
                                                     anchors.fill: parent
+                                                    anchors.rightMargin: root.pageScrollBarReserve
                                                     clip: true
                                                     spacing: Common.Theme.spaceM
-                                                    model: root.roomSummaryListModel
+                                                    model: root.deviceRoomListModel
+
+                                                    ScrollBar.vertical: ScrollBar {
+                                                        parent: roomListView.parent
+                                                        anchors.top: roomListView.top
+                                                        anchors.bottom: roomListView.bottom
+                                                        anchors.right: parent.right
+                                                        width: root.pageScrollBarWidth
+                                                        policy: ScrollBar.AsNeeded
+
+                                                        background: Rectangle {
+                                                            radius: width / 2
+                                                            color: "#eef3fa"
+                                                        }
+
+                                                        contentItem: Rectangle {
+                                                            radius: width / 2
+                                                            color: "#b8c6dc"
+                                                        }
+                                                    }
 
                                                     delegate: Rectangle {
                                                         required property string roomId
@@ -822,27 +905,31 @@ Item {
                                                         property bool hovered: roomHover.hovered
                                                         property bool pressed: roomTap.pressed
                                                         width: ListView.view.width
-                                                        height: roomCardContent.implicitHeight + Common.Theme.spaceL * 2
+                                                        height: roomCardContent.implicitHeight
+                                                                + Common.Theme.spaceL * 2
                                                         radius: Common.Theme.radiusL
-                                                        color: root.selectedRoomId === roomId
-                                                            ? (pressed ? "#e4edff" : (hovered ? "#edf4ff" : "#f3f7ff"))
-                                                            : (pressed ? "#eef3fa" : (hovered ? "#f7faff" : "#fcfdff"))
+                                                        color: root.selectedRoomId === roomId ? (pressed ? "#e4edff" : (hovered ? "#edf4ff" : "#f3f7ff")) : (pressed ? "#eef3fa" : (hovered ? "#f7faff" : "#fcfdff"))
                                                         border.width: 1
-                                                        border.color: root.selectedRoomId === roomId
-                                                            ? "#bdd0f4"
-                                                            : (hovered ? "#d4e0f1" : Common.Theme.borderColor)
-                                                        scale: pressed ? 0.992 : (hovered ? 1.006 : 1.0)
+                                                        border.color: root.selectedRoomId === roomId ? "#bdd0f4" : (hovered ? "#d4e0f1" : Common.Theme.borderColor)
+                                                        scale: pressed ? 0.992 : 1.0
 
                                                         Behavior on color {
-                                                            ColorAnimation { duration: 120 }
+                                                            ColorAnimation {
+                                                                duration: 120
+                                                            }
                                                         }
 
                                                         Behavior on border.color {
-                                                            ColorAnimation { duration: 120 }
+                                                            ColorAnimation {
+                                                                duration: 120
+                                                            }
                                                         }
 
                                                         Behavior on scale {
-                                                            NumberAnimation { duration: 90; easing.type: Easing.OutCubic }
+                                                            NumberAnimation {
+                                                                duration: 90
+                                                                easing.type: Easing.OutCubic
+                                                            }
                                                         }
 
                                                         ColumnLayout {
@@ -869,13 +956,16 @@ Item {
                                                                     fillColor: stateFill
                                                                 }
 
-                                                                Item { Layout.fillWidth: true }
+                                                                Item {
+                                                                    Layout.fillWidth: true
+                                                                }
 
                                                                 Common.ActionButton {
                                                                     text: "进入"
                                                                     variant: "secondary"
                                                                     minWidth: 88
-                                                                    onClicked: root.roomSelected(roomId)
+                                                                    onClicked: root.roomSelected(
+                                                                                   roomId)
                                                                 }
                                                             }
 
@@ -898,15 +988,18 @@ Item {
 
                                                         TapHandler {
                                                             id: roomTap
-                                                            onTapped: root.roomSelected(roomId)
+                                                            onTapped: root.roomSelected(
+                                                                          roomId)
                                                         }
                                                     }
                                                 }
 
                                                 Text {
                                                     anchors.centerIn: parent
-                                                    visible: !root.roomSummaryListModel || root.roomSummaryListModel.count === 0
-                                                    text: "当前还没有可查看的教室。"
+                                                    visible: !root.deviceRoomListModel
+                                                             || root.deviceRoomListModel.count === 0
+                                                    text: root.roomSearchText.trim(
+                                                              ) !== "" ? "未找到匹配教室。" : "当前还没有可查看的教室。"
                                                     color: Common.Theme.textSecondary
                                                     font.family: Common.Theme.fontFamily
                                                     font.pixelSize: 13
@@ -923,8 +1016,7 @@ Item {
 
                                         Common.SurfaceCard {
                                             Layout.fillWidth: true
-                                            Layout.preferredHeight: roomDevicesHeaderContent.implicitHeight
-                                                                    + padding * 2
+                                            Layout.preferredHeight: roomDevicesHeaderContent.implicitHeight + padding * 2
 
                                             ColumnLayout {
                                                 id: roomDevicesHeaderContent
@@ -949,9 +1041,7 @@ Item {
 
                                                         Text {
                                                             Layout.fillWidth: true
-                                                            text: root.selectedRoomId !== ""
-                                                                  ? ("当前教室：" + root.selectedRoomId)
-                                                                  : "当前教室"
+                                                            text: root.selectedRoomId !== "" ? ("当前教室：" + root.selectedRoomId) : "当前教室"
                                                             color: Common.Theme.textPrimary
                                                             font.family: Common.Theme.fontFamily
                                                             font.pixelSize: 24
@@ -992,12 +1082,15 @@ Item {
                                                         onClicked: root.refreshDevicePageRequested()
                                                     }
 
-                                                    Item { Layout.fillWidth: true }
+                                                    Item {
+                                                        Layout.fillWidth: true
+                                                    }
                                                 }
 
                                                 Text {
                                                     Layout.fillWidth: true
-                                                    text: root.statusText
+                                                    visible: root.roomDeviceStatusText !== ""
+                                                    text: root.roomDeviceStatusText
                                                     color: Common.Theme.textSecondary
                                                     font.family: Common.Theme.fontFamily
                                                     font.pixelSize: 13
@@ -1033,15 +1126,37 @@ Item {
                                                         ListView {
                                                             id: deviceListView
                                                             anchors.fill: parent
+                                                            anchors.rightMargin: root.pageScrollBarReserve
                                                             clip: true
                                                             spacing: Common.Theme.spaceM
                                                             model: root.deviceListModel
                                                             delegate: root.deviceListDelegate
+
+                                                            ScrollBar.vertical: ScrollBar {
+                                                                parent: deviceListView.parent
+                                                                anchors.top: deviceListView.top
+                                                                anchors.bottom: deviceListView.bottom
+                                                                anchors.right: parent.right
+                                                                width: root.pageScrollBarWidth
+                                                                policy: ScrollBar.AsNeeded
+
+                                                                background: Rectangle {
+                                                                    radius: width / 2
+                                                                    color: "#eef3fa"
+                                                                }
+
+                                                                contentItem: Rectangle {
+                                                                    radius: width / 2
+                                                                    color: "#b8c6dc"
+                                                                }
+                                                            }
                                                         }
 
                                                         Text {
                                                             anchors.centerIn: parent
-                                                            visible: !root.deviceListModel || root.deviceListModel.count === 0
+                                                            visible: !root.deviceListModel
+                                                                     || root.deviceListModel.count
+                                                                     === 0
                                                             text: "当前教室暂无设备。"
                                                             color: Common.Theme.textSecondary
                                                             font.family: Common.Theme.fontFamily
@@ -1099,10 +1214,31 @@ Item {
                                 padding: Common.Theme.spaceL
 
                                 ListView {
+                                    id: alertListView
                                     anchors.fill: parent
+                                    anchors.rightMargin: root.pageScrollBarReserve
                                     clip: true
                                     spacing: Common.Theme.spaceM
                                     model: root.alertListModel
+
+                                    ScrollBar.vertical: ScrollBar {
+                                        parent: alertListView.parent
+                                        anchors.top: alertListView.top
+                                        anchors.bottom: alertListView.bottom
+                                        anchors.right: parent.right
+                                        width: root.pageScrollBarWidth
+                                        policy: ScrollBar.AsNeeded
+
+                                        background: Rectangle {
+                                            radius: width / 2
+                                            color: "#eef3fa"
+                                        }
+
+                                        contentItem: Rectangle {
+                                            radius: width / 2
+                                            color: "#b8c6dc"
+                                        }
+                                    }
 
                                     delegate: Rectangle {
                                         required property int alertId
@@ -1112,68 +1248,75 @@ Item {
                                         required property string createdAt
                                         required property string message
                                         width: ListView.view.width
-                                        height: 84
+                                        implicitHeight: alertContent.implicitHeight
+                                                        + Common.Theme.spaceL * 2
                                         radius: Common.Theme.radiusM
                                         color: "#fcfdff"
                                         border.width: 1
                                         border.color: Common.Theme.borderColor
 
-                                        Column {
+                                        RowLayout {
+                                            id: alertContent
                                             anchors.fill: parent
                                             anchors.margins: Common.Theme.spaceL
-                                            spacing: Common.Theme.spaceS
+                                            spacing: Common.Theme.spaceM
 
-                                            RowLayout {
-                                                width: parent.width
-                                                spacing: Common.Theme.spaceM
-
-                                                Common.StatusChip {
-                                                    text: Common.Theme.severityLabel(
-                                                              level)
-                                                    toneColor: Common.Theme.severityColor(
-                                                                   level)
-                                                    fillColor: Common.Theme.severityFill(
-                                                                   level)
-                                                }
-
-                                                Text {
-                                                    text: roomId + "/" + deviceId
-                                                    color: Common.Theme.textPrimary
-                                                    font.family: Common.Theme.fontFamily
-                                                    font.pixelSize: 14
-                                                    font.bold: true
-                                                }
-
-                                                Item {
-                                                    Layout.fillWidth: true
-                                                }
-
-                                                Text {
-                                                    text: createdAt
-                                                    color: Common.Theme.textSecondary
-                                                    font.family: Common.Theme.fontFamily
-                                                    font.pixelSize: 12
-                                                }
-
-                                                Common.ActionButton {
-                                                    text: "已处理"
-                                                    variant: "secondary"
-                                                    minWidth: 76
-                                                    maxWidth: 92
-                                                    onClicked: root.processAlertRequested(
-                                                                   alertId)
-                                                }
+                                            Common.StatusChip {
+                                                Layout.alignment: Qt.AlignTop
+                                                text: Common.Theme.severityLabel(
+                                                          level)
+                                                toneColor: Common.Theme.severityColor(
+                                                               level)
+                                                fillColor: Common.Theme.severityFill(
+                                                               level)
                                             }
 
-                                            Text {
-                                                text: message
-                                                color: Common.Theme.textSecondary
-                                                width: parent.width
-                                                wrapMode: Text.WordWrap
-                                                maximumLineCount: 2
-                                                elide: Text.ElideRight
-                                                font.family: Common.Theme.fontFamily
-                                                font.pixelSize: 13
+                                            ColumnLayout {
+                                                Layout.fillWidth: true
+                                                spacing: 6
+
+                                                RowLayout {
+                                                    Layout.fillWidth: true
+                                                    spacing: Common.Theme.spaceM
+
+                                                    Text {
+                                                        text: roomId + "/" + deviceId
+                                                        color: Common.Theme.textPrimary
+                                                        font.family: Common.Theme.fontFamily
+                                                        font.pixelSize: 14
+                                                        font.bold: true
+                                                        elide: Text.ElideRight
+                                                        Layout.fillWidth: true
+                                                    }
+
+                                                    Text {
+                                                        text: createdAt
+                                                        color: Common.Theme.textSecondary
+                                                        font.family: Common.Theme.fontFamily
+                                                        font.pixelSize: 12
+                                                        Layout.alignment: Qt.AlignVCenter
+                                                    }
+
+                                                    Common.ActionButton {
+                                                        text: "已处理"
+                                                        variant: "secondary"
+                                                        minWidth: 76
+                                                        maxWidth: 92
+                                                        onClicked: root.processAlertRequested(
+                                                                       alertId)
+                                                    }
+                                                }
+
+                                                Text {
+                                                    Layout.fillWidth: true
+                                                    text: message
+                                                    color: Common.Theme.textSecondary
+                                                    wrapMode: Text.WordWrap
+                                                    maximumLineCount: 2
+                                                    elide: Text.ElideRight
+                                                    font.family: Common.Theme.fontFamily
+                                                    font.pixelSize: 13
+                                                }
                                             }
                                         }
                                     }

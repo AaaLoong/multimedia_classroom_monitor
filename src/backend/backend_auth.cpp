@@ -14,6 +14,7 @@ constexpr int kPasswordSaltLength = 16;
 constexpr int kPasswordHashLength = 32;
 constexpr int kPasswordIterations = 210000;
 constexpr int kSessionTtlSeconds = 8 * 60 * 60;
+const QString kManagedAdminInitialPassword = QStringLiteral("000000");
 
 QByteArray randomBytes(int length)
 {
@@ -232,20 +233,17 @@ AuthOperationResult BackendAuth::listAdminUsers(const AdminSession &session)
 }
 
 AuthOperationResult BackendAuth::createAdminUser(const AdminSession &session,
-                                                 const QString &username,
-                                                 const QString &password)
+                                                 const QString &username)
 {
     if (!session.isSuper)
         return {403, "forbidden", {}};
     if (!isValidAdminUsername(username))
         return {400, "invalid_username", {}};
-    if (!isValidAdminPassword(password))
-        return {400, "invalid_password", {}};
     if (!db_.loadAdminUser(username).isEmpty())
         return {409, "admin_exists", {}};
 
     const QByteArray salt = randomBytes(kPasswordSaltLength);
-    const QByteArray hash = derivePasswordHash(password, salt, kPasswordIterations);
+    const QByteArray hash = derivePasswordHash(kManagedAdminInitialPassword, salt, kPasswordIterations);
     const bool ok = db_.createAdminUser(username,
                                         QString::fromUtf8(salt.toBase64()),
                                         QString::fromUtf8(hash.toBase64()),
@@ -261,7 +259,8 @@ AuthOperationResult BackendAuth::createAdminUser(const AdminSession &session,
         QJsonDocument(QJsonObject{
             {"status", "created"},
             {"username", username},
-            {"is_super", false}
+            {"is_super", false},
+            {"initial_password", kManagedAdminInitialPassword}
         })
     };
 }
@@ -285,6 +284,37 @@ AuthOperationResult BackendAuth::deleteAdminUser(const AdminSession &session, co
         QJsonDocument(QJsonObject{
             {"status", "deleted"},
             {"username", username}
+        })
+    };
+}
+
+AuthOperationResult BackendAuth::resetAdminUserPassword(const AdminSession &session, const QString &username)
+{
+    if (!session.isSuper)
+        return {403, "forbidden", {}};
+
+    const QJsonObject target = db_.loadAdminUser(username);
+    if (target.isEmpty())
+        return {404, "admin_not_found", {}};
+    if (target.value("is_super").toBool(false))
+        return {403, "cannot_reset_super_admin", {}};
+
+    const QByteArray salt = randomBytes(kPasswordSaltLength);
+    const QByteArray hash = derivePasswordHash(kManagedAdminInitialPassword, salt, kPasswordIterations);
+    const bool ok = db_.updateAdminPassword(username,
+                                            QString::fromUtf8(salt.toBase64()),
+                                            QString::fromUtf8(hash.toBase64()),
+                                            kPasswordIterations);
+    if (!ok)
+        return {500, "reset_admin_password_failed", {}};
+
+    return {
+        200,
+        {},
+        QJsonDocument(QJsonObject{
+            {"status", "password_reset"},
+            {"username", username},
+            {"initial_password", kManagedAdminInitialPassword}
         })
     };
 }

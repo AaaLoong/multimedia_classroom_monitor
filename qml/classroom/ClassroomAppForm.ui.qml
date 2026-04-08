@@ -29,6 +29,7 @@ Item {
     property var roomSuffixOptions
     property var deviceListModel
     property Component deviceDelegate
+    readonly property int pageScrollBarWidth: 10
 
     property alias refreshButton: refreshButton
     property alias powerOnAllButton: powerOnAllButton
@@ -130,7 +131,7 @@ Item {
 
                     Common.ActionButton {
                         id: refreshButton
-                        text: "刷新状态"
+                        text: "刷新"
                         variant: "secondary"
                         enabled: root.registered
                     }
@@ -139,13 +140,33 @@ Item {
         }
 
         Flickable {
+            id: mainFlickable
             Layout.fillWidth: true
             Layout.fillHeight: true
             clip: true
             contentWidth: width
             contentHeight: contentColumn.height
             boundsBehavior: Flickable.StopAtBounds
-            ScrollBar.vertical: ScrollBar {}
+            ScrollBar.vertical: ScrollBar {
+                parent: root
+                anchors.top: mainFlickable.top
+                anchors.bottom: mainFlickable.bottom
+                anchors.right: root.right
+                width: root.pageScrollBarWidth
+                policy: ScrollBar.AlwaysOn
+                active: true
+                z: 20
+
+                background: Rectangle {
+                    radius: width / 2
+                    color: "#eef3fa"
+                }
+
+                contentItem: Rectangle {
+                    radius: width / 2
+                    color: "#b8c6dc"
+                }
+            }
 
             Column {
                 id: contentColumn
@@ -649,29 +670,70 @@ Item {
         }
     }
 
-    Rectangle {
+    Item {
         anchors.fill: parent
         visible: root.locked
-        color: "#9d18202e"
         z: 13
 
-        Column {
+        Rectangle {
+            anchors.fill: parent
+            color: "#9d18202e"
+        }
+
+        MouseArea {
+            anchors.fill: parent
+            acceptedButtons: Qt.AllButtons
+            hoverEnabled: true
+            onWheel: function(wheel) { wheel.accepted = true }
+        }
+
+        Common.SurfaceCard {
+            id: lockedCard
+            width: Math.min(440, root.width - Common.Theme.spaceXL * 2)
+            height: Math.min(lockedContent.implicitHeight + padding * 2,
+                             root.height - Common.Theme.spaceXL * 2)
             anchors.centerIn: parent
-            spacing: 8
 
-            Text {
-                text: "已锁定"
-                color: "white"
-                font.family: Common.Theme.fontFamily
-                font.pixelSize: 26
-                font.bold: true
-            }
+            Column {
+                id: lockedContent
+                width: lockedCard.width - lockedCard.padding * 2
+                spacing: Common.Theme.spaceL
 
-            Text {
-                text: "管理端已接管本教室控制权"
-                color: "#d9e1f0"
-                font.family: Common.Theme.fontFamily
-                font.pixelSize: 14
+                Rectangle {
+                    width: 56
+                    height: 56
+                    radius: 18
+                    color: Common.Theme.dangerSoft
+
+                    Text {
+                        anchors.centerIn: parent
+                        text: "锁"
+                        color: Common.Theme.danger
+                        font.family: Common.Theme.fontFamily
+                        font.pixelSize: 22
+                        font.bold: true
+                    }
+                }
+
+                Text {
+                    text: "已锁定 请联系管理员"
+                    color: Common.Theme.textPrimary
+                    font.family: Common.Theme.fontFamily
+                    font.pixelSize: 28
+                    font.bold: true
+                    wrapMode: Text.WordWrap
+                }
+
+                Text {
+                    width: parent.width
+                    text: root.roomId !== ""
+                          ? ("当前教室 " + root.roomId + " 已由管理端接管控制权")
+                          : "当前教室已由管理端接管控制权"
+                    color: Common.Theme.textSecondary
+                    wrapMode: Text.WordWrap
+                    font.family: Common.Theme.fontFamily
+                    font.pixelSize: 13
+                }
             }
         }
     }

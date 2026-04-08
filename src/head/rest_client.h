@@ -63,8 +63,9 @@ public:
     Q_INVOKABLE void unregisterClassroom(const QString &roomId);
     Q_INVOKABLE void fetchBindingByFingerprint(const QString &fingerprint);
     Q_INVOKABLE void fetchAdminUsers();
-    Q_INVOKABLE void createAdminUser(const QString &username, const QString &password);
+    Q_INVOKABLE void createAdminUser(const QString &username);
     Q_INVOKABLE void deleteAdminUser(const QString &username);
+    Q_INVOKABLE void resetAdminUserPassword(const QString &username);
     Q_INVOKABLE void changeMyPassword(const QString &oldPassword, const QString &newPassword);
     Q_INVOKABLE void startAdminEventStream();
     Q_INVOKABLE void startClassroomEventStream(const QString &roomId);

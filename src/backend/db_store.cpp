@@ -64,7 +64,7 @@ bool isTransientCommandState(const QString &state)
 
 QString isoDateTimeExpr(const char *columnName)
 {
-    return QStringLiteral("DATE_FORMAT(%1, '%%Y-%%m-%%dT%%H:%%i:%%s+08:00')").arg(QString::fromLatin1(columnName));
+    return QStringLiteral("DATE_FORMAT(%1, '%Y-%m-%dT%H:%i:%s+08:00')").arg(QString::fromLatin1(columnName));
 }
 
 } // namespace
@@ -340,25 +340,6 @@ int DbStore::resolveAllAlerts()
         return 0;
     }
     return q.numRowsAffected();
-}
-
-// 记录一次设备操作及其执行耗时。
-void DbStore::recordOperation(const QString &roomId, const QString &deviceId, const QString &action, int delayMs)
-{
-    ScopedDbLease lease([this](const QString &name) { releaseConnection(name); }, acquireConnection());
-    auto db = lease.db;
-    if (!db.isValid() || !db.isOpen())
-        return;
-    QSqlQuery q(db);
-    q.prepare(R"(INSERT INTO operations(room_id, device_id, action, delay_ms, created_at)
-                 VALUES(?,?,?,?,CURRENT_TIMESTAMP()))");
-    q.addBindValue(roomId);
-    q.addBindValue(deviceId);
-    q.addBindValue(action);
-    q.addBindValue(delayMs);
-    if (!q.exec()) {
-        qWarning("写入操作记录失败: %s", qPrintable(q.lastError().text()));
-    }
 }
 
 // 保存当前全局锁状态。
@@ -823,12 +804,6 @@ bool DbStore::unregisterClassroom(const QString &roomId)
     if (!deleteJobs.exec())
         return failAndRollback("删除命令任务失败", deleteJobs);
 
-    QSqlQuery deleteOperations(db);
-    deleteOperations.prepare(R"(DELETE FROM operations WHERE room_id=?)");
-    deleteOperations.addBindValue(roomId);
-    if (!deleteOperations.exec())
-        return failAndRollback("删除操作记录失败", deleteOperations);
-
     QSqlQuery deleteAlerts(db);
     deleteAlerts.prepare(R"(DELETE FROM alerts WHERE room_id=?)");
     deleteAlerts.addBindValue(roomId);
@@ -1271,14 +1246,6 @@ void DbStore::ensureTables(QSqlDatabase &db)
         processed_at DATETIME NULL,
         created_at DATETIME
     ))");
-    q.exec(R"(CREATE TABLE IF NOT EXISTS operations(
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        room_id VARCHAR(64),
-        device_id VARCHAR(64),
-        action VARCHAR(32),
-        delay_ms INT,
-        created_at DATETIME
-    ))");
     q.exec(R"(CREATE TABLE IF NOT EXISTS meta(
         k VARCHAR(255) PRIMARY KEY,
         v VARCHAR(255)
@@ -1361,6 +1328,7 @@ void DbStore::ensureTables(QSqlDatabase &db)
                  "command_jobs",
                  "superseded_by_command_id",
                  "ALTER TABLE command_jobs ADD COLUMN superseded_by_command_id VARCHAR(64) DEFAULT '' AFTER dedup_key");
+    q.exec(R"(DROP TABLE IF EXISTS operations)");
     q.exec(R"(DROP TABLE IF EXISTS command_events)");
     q.exec(R"(DELETE FROM meta WHERE k='command_epoch' OR k LIKE 'device_command_version:%')");
 
@@ -1420,8 +1388,6 @@ void DbStore::migrateLegacyUtcDataToShanghai(QSqlDatabase &db)
                           "迁移 alerts.created_at 失败")
         || !execMigration("UPDATE alerts SET processed_at = DATE_ADD(processed_at, INTERVAL 8 HOUR) WHERE processed_at IS NOT NULL",
                           "迁移 alerts.processed_at 失败")
-        || !execMigration("UPDATE operations SET created_at = DATE_ADD(created_at, INTERVAL 8 HOUR) WHERE created_at IS NOT NULL",
-                          "迁移 operations.created_at 失败")
         || !execMigration("UPDATE command_jobs SET deadline_at = DATE_ADD(deadline_at, INTERVAL 8 HOUR) WHERE deadline_at IS NOT NULL",
                           "迁移 command_jobs.deadline_at 失败")
         || !execMigration("UPDATE command_jobs SET created_at = DATE_ADD(created_at, INTERVAL 8 HOUR) WHERE created_at IS NOT NULL",

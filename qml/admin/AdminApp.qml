@@ -34,8 +34,8 @@ ApplicationWindow {
     property string devicePageMode: "rooms"
     property string selectedRoomId: ""
     property string selectedRoomDeviceId: ""
+    property string roomSearchText: ""
     property real deviceRoomListPosition: 0
-
     function requestLogin() {
         api.login(form.userField.text, form.passField.text)
     }
@@ -54,11 +54,16 @@ ApplicationWindow {
         alertModel.clear()
         alertPreviewModel.clear()
         roomSummaryModel.clear()
+        filteredRoomSummaryModel.clear()
         adminUserModel.clear()
         manageAdminsDialog.close()
+        resetAdminPasswordDialog.close()
+        deleteAdminDialog.close()
         changePasswordDialog.close()
         newAdminUserField.text = ""
-        newAdminPasswordField.text = ""
+        resetAdminPasswordDialog.targetUsername = ""
+        deleteAdminDialog.targetUsername = ""
+        window.roomSearchText = ""
         oldPasswordField.text = ""
         newPasswordField.text = ""
         confirmPasswordField.text = ""
@@ -73,6 +78,7 @@ ApplicationWindow {
     ListModel { id: alertModel }
     ListModel { id: alertPreviewModel }
     ListModel { id: roomSummaryModel }
+    ListModel { id: filteredRoomSummaryModel }
     ListModel { id: roomDeviceModel }
     ListModel { id: adminUserModel }
 
@@ -183,6 +189,42 @@ ApplicationWindow {
                 detail: "开机 " + item.on + " / 待机 " + item.off + " / 异常 " + (item.fault + item.offline)
             })
         }
+
+        applyRoomSummaryFilter()
+    }
+
+    function applyRoomSummaryFilter() {
+        filteredRoomSummaryModel.clear()
+
+        const keyword = String(window.roomSearchText ? window.roomSearchText : "").trim().toLowerCase()
+        for (let i = 0; i < roomSummaryModel.count; ++i) {
+            const item = roomSummaryModel.get(i)
+            const roomId = String(item.roomId ? item.roomId : "")
+            if (keyword !== "" && roomId.toLowerCase().indexOf(keyword) < 0)
+                continue
+
+            filteredRoomSummaryModel.append({
+                roomId: item.roomId,
+                stateText: item.stateText,
+                stateColor: item.stateColor,
+                stateFill: item.stateFill,
+                detail: item.detail
+            })
+        }
+    }
+
+    function setRoomSearchText(text) {
+        window.roomSearchText = text ? String(text) : ""
+        applyRoomSummaryFilter()
+        if (form && form.roomListView)
+            form.roomListView.contentY = 0
+    }
+
+    function roomListModelForDevicePage() {
+        const keyword = String(window.roomSearchText ? window.roomSearchText : "").trim()
+        if (keyword === "" && filteredRoomSummaryModel.count === 0 && roomSummaryModel.count > 0)
+            return roomSummaryModel
+        return filteredRoomSummaryModel
     }
 
     function rebuildAlertModels(alerts) {
@@ -475,16 +517,16 @@ ApplicationWindow {
             implicitHeight: createAdminSection.implicitHeight + padding * 2
             clipContent: false
             fillColor: "#f7faff"
+            padding: Common.Theme.spaceL
 
             ColumnLayout {
                 id: createAdminSection
-                anchors.fill: parent
-                anchors.margins: createAdminCard.padding
+                width: parent.width
                 spacing: Common.Theme.spaceM
 
                 Common.SectionHeader {
-                    width: parent.width
-                    title: "新增普通管理员"
+                    Layout.fillWidth: true
+                    title: "新增管理员"
                     maxTitleLines: 1
                     maxSubtitleLines: 2
                 }
@@ -495,16 +537,9 @@ ApplicationWindow {
                     placeholderText: "账号，3 到 32 位，以字母开头"
                 }
 
-                TextField {
-                    id: newAdminPasswordField
-                    Layout.fillWidth: true
-                    placeholderText: "初始密码，6 到 64 位"
-                    echoMode: TextInput.Password
-                }
-
                 Text {
                     Layout.fillWidth: true
-                    text: "创建后可由普通管理员自行修改密码。"
+                    text: "创建后默认初始密码为 000000，管理员登录后可自行修改。"
                     color: Common.Theme.textSecondary
                     font.family: Common.Theme.fontFamily
                     font.pixelSize: 12
@@ -513,13 +548,14 @@ ApplicationWindow {
 
                 RowLayout {
                     Layout.fillWidth: true
+                    Layout.topMargin: Common.Theme.spaceS
 
                     Item { Layout.fillWidth: true }
 
                     Common.ActionButton {
                         text: "新增管理员"
-                        enabled: newAdminUserField.text.trim() !== "" && newAdminPasswordField.text !== ""
-                        onClicked: api.createAdminUser(newAdminUserField.text, newAdminPasswordField.text)
+                        enabled: newAdminUserField.text.trim() !== ""
+                        onClicked: api.createAdminUser(newAdminUserField.text)
                     }
                 }
             }
@@ -551,8 +587,7 @@ ApplicationWindow {
 
                     ColumnLayout {
                         id: adminCardContent
-                        anchors.fill: parent
-                        anchors.margins: parent.padding
+                        width: parent.width
                         spacing: Common.Theme.spaceS
 
                         RowLayout {
@@ -568,7 +603,7 @@ ApplicationWindow {
                             }
 
                             Common.StatusChip {
-                                text: isSuper ? "超级管理员" : "普通管理员"
+                                text: isSuper ? "超级管理员" : "管理员"
                                 toneColor: isSuper ? Common.Theme.warning : Common.Theme.accent
                                 fillColor: isSuper ? "#fff4dd" : Common.Theme.accentSoft
                             }
@@ -577,17 +612,30 @@ ApplicationWindow {
 
                             Common.ActionButton {
                                 visible: !isSuper
+                                text: "重置"
+                                variant: "secondary"
+                                onClicked: {
+                                    resetAdminPasswordDialog.targetUsername = username
+                                    resetAdminPasswordDialog.open()
+                                }
+                            }
+
+                            Common.ActionButton {
+                                visible: !isSuper
                                 text: "删除"
                                 variant: "danger"
-                                onClicked: api.deleteAdminUser(username)
+                                onClicked: {
+                                    deleteAdminDialog.targetUsername = username
+                                    deleteAdminDialog.open()
+                                }
                             }
                         }
 
                         Text {
                             Layout.fillWidth: true
                             text: isSuper
-                                  ? "超级管理员固定保留，不支持删除。"
-                                  : ("创建时间 " + createdAt + " | 最近改密 " + (passwordUpdatedAt !== "" ? passwordUpdatedAt : "未记录"))
+                                  ? ""
+                                  :("创建时间 " + createdAt + " | 最近改密 " + (passwordUpdatedAt !== "" ? passwordUpdatedAt : "未记录"))
                             color: Common.Theme.textSecondary
                             font.family: Common.Theme.fontFamily
                             font.pixelSize: 12
@@ -613,13 +661,204 @@ ApplicationWindow {
         }
     }
 
+    Dialog {
+        id: resetAdminPasswordDialog
+        property string targetUsername: ""
+        modal: true
+        focus: true
+        padding: 0
+        standardButtons: Dialog.NoButton
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        width: 420
+        x: Math.round((window.width - width) / 2)
+        y: Math.round((window.height - height) / 2)
+
+        background: Rectangle {
+            radius: Common.Theme.radiusL
+            color: Common.Theme.cardBg
+            border.width: 1
+            border.color: Common.Theme.borderColor
+        }
+
+        contentItem: ColumnLayout {
+            anchors.fill: parent
+            spacing: 0
+
+            Rectangle {
+                Layout.fillWidth: true
+                implicitHeight: resetAdminPasswordTitle.implicitHeight + Common.Theme.spaceL * 2
+                color: "#f7faff"
+                radius: Common.Theme.radiusL
+
+                Rectangle {
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.bottom: parent.bottom
+                    height: Common.Theme.radiusL
+                    color: parent.color
+                }
+
+                Text {
+                    id: resetAdminPasswordTitle
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.margins: Common.Theme.spaceL
+                    text: "重置管理员密码"
+                    color: Common.Theme.textPrimary
+                    font.family: Common.Theme.fontFamily
+                    font.pixelSize: 22
+                    font.bold: true
+                    wrapMode: Text.WordWrap
+                }
+            }
+
+            ColumnLayout {
+                Layout.fillWidth: true
+                Layout.margins: Common.Theme.spaceL
+                spacing: Common.Theme.spaceL
+
+                Text {
+                    Layout.fillWidth: true
+                    text: "确认重置管理员 " + resetAdminPasswordDialog.targetUsername + "？"
+                    color: Common.Theme.textPrimary
+                    font.family: Common.Theme.fontFamily
+                    font.pixelSize: 16
+                    wrapMode: Text.WordWrap
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+
+                    Item { Layout.fillWidth: true }
+
+                    Common.ActionButton {
+                        text: "取消"
+                        variant: "secondary"
+                        minWidth: 88
+                        onClicked: resetAdminPasswordDialog.close()
+                    }
+
+                    Common.ActionButton {
+                        text: "重置"
+                        minWidth: 102
+                        enabled: resetAdminPasswordDialog.targetUsername !== ""
+                        onClicked: {
+                            const username = resetAdminPasswordDialog.targetUsername
+                            resetAdminPasswordDialog.close()
+                            api.resetAdminUserPassword(username)
+                        }
+                    }
+                }
+            }
+        }
+
+        onClosed: targetUsername = ""
+    }
+
+    Dialog {
+        id: deleteAdminDialog
+        property string targetUsername: ""
+        modal: true
+        focus: true
+        padding: 0
+        standardButtons: Dialog.NoButton
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        width: 420
+        x: Math.round((window.width - width) / 2)
+        y: Math.round((window.height - height) / 2)
+
+        background: Rectangle {
+            radius: Common.Theme.radiusL
+            color: Common.Theme.cardBg
+            border.width: 1
+            border.color: Common.Theme.borderColor
+        }
+
+        contentItem: ColumnLayout {
+            anchors.fill: parent
+            spacing: 0
+
+            Rectangle {
+                Layout.fillWidth: true
+                implicitHeight: deleteAdminTitle.implicitHeight + Common.Theme.spaceL * 2
+                color: "#f7faff"
+                radius: Common.Theme.radiusL
+
+                Rectangle {
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.bottom: parent.bottom
+                    height: Common.Theme.radiusL
+                    color: parent.color
+                }
+
+                Text {
+                    id: deleteAdminTitle
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.margins: Common.Theme.spaceL
+                    text: "删除管理员"
+                    color: Common.Theme.textPrimary
+                    font.family: Common.Theme.fontFamily
+                    font.pixelSize: 22
+                    font.bold: true
+                    wrapMode: Text.WordWrap
+                }
+            }
+
+            ColumnLayout {
+                Layout.fillWidth: true
+                Layout.margins: Common.Theme.spaceL
+                spacing: Common.Theme.spaceL
+
+                Text {
+                    Layout.fillWidth: true
+                    text: "确认删除管理员 " + deleteAdminDialog.targetUsername + "？"
+                    color: Common.Theme.textPrimary
+                    font.family: Common.Theme.fontFamily
+                    font.pixelSize: 16
+                    wrapMode: Text.WordWrap
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+
+                    Item { Layout.fillWidth: true }
+
+                    Common.ActionButton {
+                        text: "取消"
+                        variant: "secondary"
+                        minWidth: 88
+                        onClicked: deleteAdminDialog.close()
+                    }
+
+                    Common.ActionButton {
+                        text: "删除"
+                        variant: "danger"
+                        minWidth: 102
+                        enabled: deleteAdminDialog.targetUsername !== ""
+                        onClicked: {
+                            const username = deleteAdminDialog.targetUsername
+                            deleteAdminDialog.close()
+                            api.deleteAdminUser(username)
+                        }
+                    }
+                }
+            }
+        }
+
+        onClosed: targetUsername = ""
+    }
+
     Common.AppDialog {
         id: changePasswordDialog
         dialogTitle: "修改密码"
         preferredDialogWidth: 520
-        preferredDialogHeight: 420
+        preferredDialogHeight: 460
         minimumDialogWidth: 440
-        minimumDialogHeight: 320
+        minimumDialogHeight: 360
 
         Common.SurfaceCard {
             id: changePasswordCard
@@ -627,11 +866,11 @@ ApplicationWindow {
             implicitHeight: changePasswordSection.implicitHeight + padding * 2
             clipContent: false
             fillColor: "#f7faff"
+            padding: Common.Theme.spaceL
 
             ColumnLayout {
                 id: changePasswordSection
-                anchors.fill: parent
-                anchors.margins: changePasswordCard.padding
+                width: parent.width
                 spacing: Common.Theme.spaceM
 
                 Text {
@@ -648,6 +887,7 @@ ApplicationWindow {
                     Layout.fillWidth: true
                     placeholderText: "当前密码"
                     echoMode: TextInput.Password
+                    passwordMaskDelay: 0
                 }
 
                 TextField {
@@ -655,6 +895,7 @@ ApplicationWindow {
                     Layout.fillWidth: true
                     placeholderText: "新密码"
                     echoMode: TextInput.Password
+                    passwordMaskDelay: 0
                 }
 
                 TextField {
@@ -662,19 +903,12 @@ ApplicationWindow {
                     Layout.fillWidth: true
                     placeholderText: "确认新密码"
                     echoMode: TextInput.Password
-                }
-
-                Text {
-                    Layout.fillWidth: true
-                    text: "普通管理员仅可修改本人密码。"
-                    color: Common.Theme.textSecondary
-                    font.family: Common.Theme.fontFamily
-                    font.pixelSize: 12
-                    wrapMode: Text.WordWrap
+                    passwordMaskDelay: 0
                 }
 
                 RowLayout {
                     Layout.fillWidth: true
+                    Layout.topMargin: Common.Theme.spaceS
 
                     Item { Layout.fillWidth: true }
 
@@ -815,6 +1049,8 @@ ApplicationWindow {
         devicePageMode: window.devicePageMode
         selectedRoomId: window.selectedRoomId
         roomSummaryListModel: roomSummaryModel
+        deviceRoomListModel: window.roomListModelForDevicePage()
+        roomSearchText: window.roomSearchText
         alertPreviewModel: alertPreviewModel
         alertListModel: alertModel
         deviceListModel: roomDeviceModel
@@ -828,7 +1064,10 @@ ApplicationWindow {
 
     Connections {
         target: form.navDeviceButton
-        function onClicked() { window.navIndex = 1 }
+        function onClicked() {
+            window.navIndex = 1
+            window.applyRoomSummaryFilter()
+        }
     }
 
     Connections {
@@ -876,6 +1115,7 @@ ApplicationWindow {
         target: form
         function onRoomSelected(roomId) { window.enterRoomDevicesPage(roomId) }
         function onBackToRoomsRequested() { window.leaveRoomDevicesPage() }
+        function onRoomSearchTextEdited(text) { window.setRoomSearchText(text) }
         function onPowerOnRequested() { window.sendSelectedCommand("power_on") }
         function onPowerOffRequested() { window.sendSelectedCommand("power_off") }
         function onRefreshDevicePageRequested() {
@@ -899,7 +1139,7 @@ ApplicationWindow {
 
         function onLoginSucceeded() {
             window.loggedIn = true
-            window.statusText = "登录成功，正在同步设备状态"
+            window.statusText = "登录成功"
             api.startAdminEventStream()
             api.fetchDevices()
             api.fetchLock()
@@ -959,12 +1199,17 @@ ApplicationWindow {
         function onOperationFinished(action, message) {
             if (action === "admin_create") {
                 newAdminUserField.text = ""
-                newAdminPasswordField.text = ""
             } else if (action === "password_change") {
                 oldPasswordField.text = ""
                 newPasswordField.text = ""
                 confirmPasswordField.text = ""
                 changePasswordDialog.close()
+            } else if (action === "admin_delete") {
+                deleteAdminDialog.close()
+                deleteAdminDialog.targetUsername = ""
+            } else if (action === "admin_reset_password") {
+                resetAdminPasswordDialog.close()
+                resetAdminPasswordDialog.targetUsername = ""
             }
             window.statusText = message
         }

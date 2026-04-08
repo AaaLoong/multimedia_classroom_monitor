@@ -81,7 +81,6 @@ public:
     void insertAlert(const QString &roomId, const QString &deviceId, const QString &message, const QString &level);
     bool resolveAlert(int alertId);
     int resolveAllAlerts();
-    void recordOperation(const QString &roomId, const QString &deviceId, const QString &action, int delayMs);
     void setLock(bool locked);
     bool locked() const;
     bool hasRecentCommand(const QString &dedupKey, int windowSeconds);
