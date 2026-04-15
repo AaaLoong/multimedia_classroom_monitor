@@ -101,6 +101,25 @@ ApplicationWindow {
         return s
     }
 
+    function localizedDeviceName(deviceId) {
+        const map = {
+            "proj": "投影仪",
+            "amp": "功放",
+            "pc": "讲台电脑",
+            "mic": "无线麦克风",
+            "screen": "电动幕布"
+        }
+        const normalizedId = String(deviceId ? deviceId : "").trim()
+        return map[normalizedId] ? map[normalizedId] : normalizedId
+    }
+
+    function displayDeviceName(name, deviceId) {
+        const preferredName = String(name ? name : "").trim()
+        if (preferredName !== "")
+            return preferredName
+        return localizedDeviceName(deviceId)
+    }
+
     function uniqueRoomCount() {
         let map = {}
         for (let i = 0; i < devicesCache.length; ++i) {
@@ -227,16 +246,32 @@ ApplicationWindow {
         return filteredRoomSummaryModel
     }
 
+    function hasRoomInDevicesCache(roomId) {
+        const targetRoomId = String(roomId ? roomId : "").trim()
+        if (targetRoomId === "")
+            return false
+
+        for (let i = 0; i < window.devicesCache.length; ++i) {
+            const d = window.devicesCache[i]
+            const rid = d.room_id ? d.room_id : d.roomId
+            if (String(rid ? rid : "").trim() === targetRoomId)
+                return true
+        }
+        return false
+    }
+
     function rebuildAlertModels(alerts) {
         alertModel.clear()
         alertPreviewModel.clear()
         for (let i = 0; i < alerts.length; ++i) {
             const a = alerts[i]
+            const deviceId = a.device_id ? a.device_id : ""
             const item = {
                 alertId: a.id ? a.id : 0,
                 level: a.level ? a.level : "warning",
                 roomId: a.room_id ? a.room_id : "",
-                deviceId: a.device_id ? a.device_id : "",
+                deviceId: deviceId,
+                deviceName: displayDeviceName(a.name ? a.name : "", deviceId),
                 message: a.message ? a.message : "",
                 createdAt: a.created_at ? formatTimestamp(a.created_at) : ""
             }
@@ -257,10 +292,12 @@ ApplicationWindow {
             if (rid !== window.selectedRoomId)
                 continue
 
+            const deviceId = d.device_id ? d.device_id : (d.deviceId ? d.deviceId : "")
+
             roomDeviceModel.append({
                 roomId: rid,
-                deviceId: d.device_id ? d.device_id : (d.deviceId ? d.deviceId : ""),
-                name: d.name ? d.name : "",
+                deviceId: deviceId,
+                name: displayDeviceName(d.name ? d.name : "", deviceId),
                 status: d.status ? d.status : "",
                 updated: d.updated ? d.updated : ""
             })
@@ -448,13 +485,6 @@ ApplicationWindow {
                         font.family: Common.Theme.fontFamily
                         font.pixelSize: 18
                         font.bold: true
-                    }
-
-                    Text {
-                        text: deviceId
-                        color: Common.Theme.textSecondary
-                        font.family: Common.Theme.fontFamily
-                        font.pixelSize: 13
                     }
 
                     Item { Layout.fillWidth: true }
@@ -1164,8 +1194,16 @@ ApplicationWindow {
 
         function onDevicesReceived(devices) {
             window.devicesCache = devices ? devices : []
+            let removedSelectedRoom = false
+            if (window.devicePageMode === "roomDevices"
+                    && window.selectedRoomId !== ""
+                    && !window.hasRoomInDevicesCache(window.selectedRoomId)) {
+                removedSelectedRoom = true
+                window.leaveRoomDevicesPage()
+                window.statusText = "当前教室未注册或已移除，已返回教室列表"
+            }
             window.rebuildSelectedRoomDevices()
-            if (window.manualRefresh)
+            if (window.manualRefresh && !removedSelectedRoom)
                 window.statusText = "设备与教室状态已更新"
             window.manualRefresh = false
             window.buildRoomSummary()

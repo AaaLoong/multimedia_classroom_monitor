@@ -505,6 +505,8 @@ private:
             const auto obj = item.toObject();
             const QString roomId = obj.value("room_id").toString();
             const QString deviceId = obj.value("device_id").toString();
+            if (!registeredRooms_.contains(roomId))
+                continue;
             auto runtime = ensureRoomRuntimeLocked(roomId);
 
             DeviceState state;
@@ -597,6 +599,8 @@ private:
             std::sort(roomIds.begin(), roomIds.end());
             runtimes.reserve(roomIds.size());
             for (const auto &roomId : roomIds) {
+                if (!registeredRooms_.contains(roomId))
+                    continue;
                 const auto runtime = roomRuntimes_.value(roomId);
                 if (runtime)
                     runtimes.push_back(qMakePair(roomId, runtime));
@@ -653,7 +657,7 @@ private:
         }
 
         const bool lockedCopy = lockedState();
-        if (!roomFilter.isEmpty() && !isAdmin && !isRoomRegistered(roomFilter)) {
+        if (!roomFilter.isEmpty() && !isRoomRegistered(roomFilter)) {
             respondJson(res, QJsonDocument(QJsonObject{
                              {"locked", lockedCopy},
                              {"devices", QJsonArray()}

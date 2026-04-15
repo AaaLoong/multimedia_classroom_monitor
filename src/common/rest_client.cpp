@@ -88,6 +88,8 @@ static QString errorMessageFromDocument(const QJsonDocument &doc, const QString 
             return QStringLiteral("告警记录无效");
         if (error == "alert_not_found")
             return QStringLiteral("未找到可处理的告警");
+        if (error == "room_not_registered")
+            return QStringLiteral("当前教室未注册");
         if (error == "room_already_bound")
             return QStringLiteral("该教室已绑定其他终端，请联系管理员处理");
         if (error == "fingerprint_already_bound")
@@ -628,7 +630,10 @@ void RestClient::submitReport(const QString &roomId, const QString &deviceId, co
     handleReply(reply, [=](const QJsonDocument &doc) {
         Q_UNUSED(doc);
         emit operationFinished("report", QStringLiteral("报修已提交"));
-        fetchAlerts();
+        // /alerts 仅供管理员端使用，教室端报修成功后不应再触发该接口，
+        // 否则会把一次无关的 401 覆盖成状态栏错误提示。
+        if (!token_.isEmpty())
+            fetchAlerts();
     });
 }
 

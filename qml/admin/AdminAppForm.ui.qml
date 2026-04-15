@@ -726,6 +726,7 @@ Item {
                                                             required property string level
                                                             required property string roomId
                                                             required property string deviceId
+                                                            required property string deviceName
                                                             required property string message
                                                             width: parent.width
                                                             height: 56
@@ -755,7 +756,7 @@ Item {
                                                                 }
 
                                                                 Text {
-                                                                    text: roomId + "/" + deviceId
+                                                                    text: roomId + "/" + deviceName
                                                                     color: Common.Theme.textPrimary
                                                                     Layout.alignment: Qt.AlignVCenter
                                                                     font.family: Common.Theme.fontFamily
@@ -1245,6 +1246,7 @@ Item {
                                         required property string level
                                         required property string roomId
                                         required property string deviceId
+                                        required property string deviceName
                                         required property string createdAt
                                         required property string message
                                         width: ListView.view.width
@@ -1280,7 +1282,7 @@ Item {
                                                     spacing: Common.Theme.spaceM
 
                                                     Text {
-                                                        text: roomId + "/" + deviceId
+                                                        text: roomId + "/" + deviceName
                                                         color: Common.Theme.textPrimary
                                                         font.family: Common.Theme.fontFamily
                                                         font.pixelSize: 14
@@ -1298,7 +1300,7 @@ Item {
                                                     }
 
                                                     Common.ActionButton {
-                                                        text: "已处理"
+                                                        text: "处理"
                                                         variant: "secondary"
                                                         minWidth: 76
                                                         maxWidth: 92
